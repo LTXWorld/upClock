@@ -123,7 +123,7 @@
 
 ### 全量版（包含视觉模块）
 
-1. 同步依赖并构建：
+1. 同步依赖并构建（脚本会使用独立虚拟环境 `.venv-full`，不影响开发环境）：
    ```bash
    uv sync --extra macos --extra vision
    bash scripts/build_macos_app.sh
@@ -132,7 +132,7 @@
 
 ### 轻量版（仅键鼠 + 状态栏 + 仪表盘）
 
-1. 同步依赖并构建：
+1. 同步依赖并构建（脚本会使用独立虚拟环境 `.venv-light`）：
    ```bash
    uv sync --extra macos
    bash scripts/build_macos_app_light.sh
@@ -147,6 +147,7 @@
 3. 公共发布时请考虑使用开发者证书进行 `codesign` 与 Apple notarization，以减少 Gatekeeper 提示。
 
 > **提示**：完整版与轻量版共用同一份代码，仅在打包脚本中通过环境变量控制是否包含视觉模块。运行轻量版时，缺少视觉依赖会让摄像头功能自动禁用，其余体验保持一致。
+> 两个脚本分别使用 `.venv-full` 与 `.venv-light` 作为独立虚拟环境，可直接删除这些目录以重新构建，不会影响日常开发所用的 `.venv`。
    - 双击运行 `dist/upClock.app`，确认状态栏图标/仪表盘/通知都正常工作。
    - 若计划对外分发，可将 `dist/upClock.app` 打包为 ZIP，或使用 `hdiutil create` 生成 DMG。
    - 公共发布时请考虑使用开发者证书进行 `codesign` 与 Apple notarization，以减少 Gatekeeper 提示。

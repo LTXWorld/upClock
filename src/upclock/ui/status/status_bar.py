@@ -111,11 +111,15 @@ class StatusBarApp(rumps.App):
         self,
         snapshot_provider: Callable[[], Optional[StatusSnapshot]],
         notification_provider: Callable[[], Optional[NotificationMessage]],
+        on_system_sleep: Optional[Callable[[], None]] = None,
+        on_system_wake: Optional[Callable[[], None]] = None,
     ) -> None:
         _ensure_info_plist()
         super().__init__(name="upClock", title="⌚", quit_button=None)
         self._snapshot_provider = snapshot_provider
         self._notification_provider = notification_provider
+        self._on_system_sleep = on_system_sleep
+        self._on_system_wake = on_system_wake
         self._banner_popover = None
         self._banner_timer: Optional[rumps.Timer] = None
         self.menu = [
@@ -129,6 +133,8 @@ class StatusBarApp(rumps.App):
         ]
         self._poll_timer = rumps.Timer(self._refresh, 2.0)
         self._last_snapshot: Optional[StatusSnapshot] = None
+        if self._on_system_sleep or self._on_system_wake:
+            self._register_power_events()
 
     def run(self, *args, **kwargs):  # type: ignore[override]
         self._poll_timer.start()
@@ -197,6 +203,31 @@ class StatusBarApp(rumps.App):
         except Exception:  # pragma: no cover - 请求失败时忽略
             rumps.logger.debug("状态栏弹跳请求失败", exc_info=True)
 
+    def _register_power_events(self) -> None:
+        try:
+            import rumps.events as events
+        except Exception:  # pragma: no cover - rumps 版本不支持事件
+            return
+
+        if self._on_system_sleep is not None:
+            events.on_sleep(self._handle_system_sleep)
+        if self._on_system_wake is not None:
+            events.on_wake(self._handle_system_wake)
+
+    def _handle_system_sleep(self, *_args, **_kwargs) -> None:
+        if self._on_system_sleep is not None:
+            try:
+                self._on_system_sleep()
+            except Exception:  # pragma: no cover - 回调异常不影响主循环
+                rumps.logger.error("处理系统休眠事件失败", exc_info=True)
+
+    def _handle_system_wake(self, *_args, **_kwargs) -> None:
+        if self._on_system_wake is not None:
+            try:
+                self._on_system_wake()
+            except Exception:  # pragma: no cover
+                rumps.logger.error("处理系统唤醒事件失败", exc_info=True)
+
     def _show_transient_banner(self, text: str) -> None:
         """在状态栏图标下方短暂展示提醒文本。"""
 
@@ -256,8 +287,15 @@ class StatusBarApp(rumps.App):
 def run_status_bar_app(
     snapshot_provider: Callable[[], Optional[StatusSnapshot]],
     notification_provider: Callable[[], Optional[NotificationMessage]],
+    on_system_sleep: Optional[Callable[[], None]] = None,
+    on_system_wake: Optional[Callable[[], None]] = None,
 ) -> None:
-    app = StatusBarApp(snapshot_provider, notification_provider)
+    app = StatusBarApp(
+        snapshot_provider,
+        notification_provider,
+        on_system_sleep=on_system_sleep,
+        on_system_wake=on_system_wake,
+    )
     app.run()
 
 

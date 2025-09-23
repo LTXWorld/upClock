@@ -11,8 +11,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from upclock.adapters.macos import MacOSInputMonitor, MacOSWindowMonitor
-from upclock.adapters.vision import SimulatedVisionAdapter, VisionAdapter
-from upclock.adapters.vision.camera_adapter import CameraVisionAdapter
+from upclock.adapters.vision import (
+    CameraVisionAdapter,
+    SimulatedVisionAdapter,
+    VisionAdapter,
+    camera_import_exc,
+)
 from upclock.adapters.vision.controller import VisionController
 from upclock.adapters.vision.posture_estimator import PostureEstimationConfig
 from upclock.config import AppConfig
@@ -36,6 +40,8 @@ class SharedState:
     status: Optional[StatusSnapshot] = None
     activity: Optional[ActivitySnapshot] = None
     notification: Optional[NotificationMessage] = None
+    system_sleeping: bool = False
+    system_state_changed_at: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def set(
@@ -49,6 +55,21 @@ class SharedState:
             self.status = status
             if notification is not None:
                 self.notification = notification
+
+    def set_system_sleeping(self, sleeping: bool) -> None:
+        """更新系统睡眠状态。"""
+
+        with self._lock:
+            self.system_sleeping = sleeping
+            self.system_state_changed_at = time.time()
+
+    def is_system_sleeping(self) -> bool:
+        with self._lock:
+            return self.system_sleeping
+
+    def last_system_state_change(self) -> float:
+        with self._lock:
+            return self.system_state_changed_at
 
     def get_status(self) -> Optional[StatusSnapshot]:
         with self._lock:
@@ -76,6 +97,14 @@ async def run_backend(shared: SharedState) -> None:
     window_monitor = MacOSWindowMonitor(buffer, categories=config.window_categories)
     vision_adapter: Optional[VisionAdapter] = None
     vision_controller: Optional[VisionController] = None
+
+    if config.vision_enabled:
+        if CameraVisionAdapter is None:
+            logging.getLogger(__name__).warning(
+                "摄像头模块初始化失败，将禁用视觉检测: %s",
+                camera_import_exc,
+            )
+            config = config.model_copy(update={"vision_enabled": False})
 
     if config.vision_enabled:
         try:
@@ -120,9 +149,58 @@ async def run_backend(shared: SharedState) -> None:
     last_notification_at: Optional[float] = None
     last_suggestion: Optional[str] = None
     cooldown_seconds = config.notification_cooldown_minutes * 60
+    was_sleeping = shared.is_system_sleeping()
 
     try:
         while True:
+            sleeping = shared.is_system_sleeping()
+
+            if sleeping:
+                if not was_sleeping:
+                    engine.reset_state()
+                    if buffer is not None:
+                        buffer.clear()
+                now = time.time()
+                snapshot = ActivitySnapshot(
+                    score=1.0,
+                    state=ActivityState.SHORT_BREAK,
+                    metrics={
+                        "activity_sum": 0.0,
+                        "normalized_activity": 0.0,
+                        "seated_minutes": 0.0,
+                        "break_minutes": 0.0,
+                        "presence_confidence": 0.0,
+                        "posture_score": 1.0,
+                        "posture_state": "sleeping",
+                        "score": 1.0,
+                        "system_state": "sleeping",
+                    },
+                )
+
+                shared.set(
+                    activity=snapshot,
+                    status=StatusSnapshot(
+                        state=ActivityState.SHORT_BREAK,
+                        score=1.0,
+                        seated_minutes=0.0,
+                        break_minutes=0.0,
+                        updated_at=now,
+                        next_reminder_minutes=None,
+                    ),
+                    notification=None,
+                )
+
+                last_notification_at = None
+                was_sleeping = True
+                await asyncio.sleep(2.0)
+                continue
+
+            if was_sleeping:
+                engine.reset_state()
+                if buffer is not None:
+                    buffer.clear()
+                was_sleeping = False
+
             snapshot = engine.compute_snapshot()
 
             probe_pending = float(snapshot.metrics.get("visual_probe_pending", 0.0) or 0.0) >= 0.5

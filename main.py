@@ -44,7 +44,20 @@ def main() -> None:
     def notification_provider() -> Optional[NotificationMessage]:
         return shared_state.pop_notification()
 
-    run_status_bar_app(snapshot_provider, notification_provider)
+    def handle_system_sleep() -> None:
+        logging.getLogger(__name__).info("检测到系统进入睡眠，暂停久坐计算")
+        shared_state.set_system_sleeping(True)
+
+    def handle_system_wake() -> None:
+        logging.getLogger(__name__).info("系统唤醒，恢复久坐计算")
+        shared_state.set_system_sleeping(False)
+
+    run_status_bar_app(
+        snapshot_provider,
+        notification_provider,
+        on_system_sleep=handle_system_sleep,
+        on_system_wake=handle_system_wake,
+    )
 
 
 if __name__ == "__main__":

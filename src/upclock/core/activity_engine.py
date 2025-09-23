@@ -67,10 +67,19 @@ class ActivityEngine:
             )
 
         recent_records = [r for r in records if now - r.timestamp <= self._activity_window]
-        activity_sum = sum(
-            max(0.0, r.values.get("keyboard_mouse_activity", r.values.get("total_events", 0.0)))
-            for r in recent_records
-        )
+        activity_sum = 0.0
+        has_recent_keyboard_mouse = False
+        for record in recent_records:
+            value = record.values.get("keyboard_mouse_activity")
+            if value is None:
+                value = record.values.get("total_events", 0.0)
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                numeric = 0.0
+            if numeric > 0.0:
+                has_recent_keyboard_mouse = True
+            activity_sum += max(0.0, numeric)
         normalized_activity = min(activity_sum / self._baseline_activity, 1.0) if activity_sum else 0.0
 
         last_activity_at = self._last_activity_time(records)
@@ -87,7 +96,11 @@ class ActivityEngine:
 
         break_minutes = max(0.0, (now - last_activity_at).total_seconds() / 60)
 
-        if vision_signal is not None and vision_signal.confidence < self._config.vision_presence_threshold:
+        if (
+            vision_signal is not None
+            and vision_signal.confidence < self._config.vision_presence_threshold
+            and not has_recent_keyboard_mouse
+        ):
             break_minutes = max(break_minutes, float(self._config.break_reset_minutes))
 
         seated_minutes = self._update_seated_timer(now, last_activity_at, break_minutes)
@@ -140,6 +153,13 @@ class ActivityEngine:
         if self._visual_probe_requested_at is None:
             return
         self._visual_probe_triggered_at = now or self._now()
+
+    def reset_state(self) -> None:
+        """重置内部计时器，适用于系统休眠或手动清零场景。"""
+
+        self._seated_started_at = None
+        self._visual_probe_requested_at = None
+        self._visual_probe_triggered_at = None
 
     def _update_seated_timer(
         self, now: dt.datetime, last_activity_at: dt.datetime, break_minutes: float

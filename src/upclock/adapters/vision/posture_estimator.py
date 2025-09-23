@@ -7,7 +7,10 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
+try:  # pragma: no cover - numpy 为可选依赖
+    import numpy as np
+except ImportError:  # pragma: no cover - 缺少 numpy 时允许降级
+    np = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,8 @@ class PostureEstimator(abc.ABC):
     """姿态估计器抽象基类。"""
 
     def __init__(self, config: Optional[PostureEstimationConfig] = None) -> None:
+        if np is None:  # pragma: no cover - 缺少 numpy 时不应实例化
+            raise RuntimeError("未找到 numpy，姿态估计模块不可用，请安装 `uv sync --extra vision`")
         self._config = config or PostureEstimationConfig()
 
     @abc.abstractmethod
@@ -187,6 +192,10 @@ def create_posture_estimator(
     """根据配置创建姿态估计器，未安装依赖时返回 None。"""
 
     backend = (backend or "mediapipe").lower()
+
+    if np is None:
+        logger.warning("未安装 numpy，姿态估计功能将禁用")
+        return None
 
     def _create(single_backend: str) -> PostureEstimator:
         if single_backend == "mediapipe":

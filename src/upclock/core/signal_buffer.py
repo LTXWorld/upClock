@@ -42,3 +42,9 @@ class SignalBuffer:
 
         with self._lock:
             return list(self._records)
+
+    def clear(self) -> None:
+        """清空缓冲区，通常用于系统休眠等场景重置状态。"""
+
+        with self._lock:
+            self._records.clear()

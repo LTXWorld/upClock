@@ -72,3 +72,26 @@ def test_activity_engine_short_break_after_inactivity() -> None:
 
     assert snapshot.state is ActivityState.SHORT_BREAK
     assert snapshot.metrics["break_minutes"] >= 5
+
+
+def test_activity_engine_keeps_active_when_vision_uncertain() -> None:
+    buffer = SignalBuffer()
+    buffer.append(
+        SignalRecord(
+            timestamp=_fixed_now() - dt.timedelta(seconds=5),
+            values={"presence_confidence": 0.2, "posture_state": "unknown"},
+        )
+    )
+    buffer.append(
+        SignalRecord(
+            timestamp=_fixed_now() - dt.timedelta(seconds=2),
+            values={"keyboard_mouse_activity": 10.0, "total_events": 10.0},
+        )
+    )
+
+    engine = ActivityEngine(buffer, config=_config())
+    engine._now = _fixed_now  # type: ignore[method-assign]
+    snapshot = engine.compute_snapshot()
+
+    assert snapshot.state is ActivityState.ACTIVE
+    assert snapshot.metrics["break_minutes"] < 1
