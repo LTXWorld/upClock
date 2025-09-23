@@ -1,0 +1,32 @@
+[project]
+name = "upclock"
+version = "0.1.0"
+description = "桌面久坐提醒助手"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "pydantic>=2.7.0",
+    "uvicorn[standard]>=0.30.0",
+    "pyobjc-framework-Quartz>=9.2",
+    "pyobjc-framework-Cocoa>=9.2",
+    "rumps>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+vision = [
+    "opencv-python>=4.10",
+    "numpy>=1.26",
+    "mediapipe>=0.10",
+    "onnxruntime>=1.17",
+]
+macos = [
+    "py2app>=0.28",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"

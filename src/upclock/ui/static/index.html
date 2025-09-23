@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>upClock 实时监控</title>
+    <link rel="stylesheet" href="/static/css/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js" crossorigin="anonymous"></script>
+  </head>
+  <body>
+    <header class="top-bar">
+      <h1>upClock 实时久坐监控</h1>
+      <p class="subtitle">最近 5 分钟活动趋势 · 每 2 秒刷新</p>
+    </header>
+    <main class="content">
+      <section class="cards">
+        <article class="card">
+          <h2>当前状态</h2>
+          <p id="state" class="state-badge">--</p>
+          <small id="last-updated">最近更新时间：--</small>
+        </article>
+        <article class="card">
+          <h2>活跃得分</h2>
+          <p id="score" class="metric-value">0.00</p>
+          <small>归一化键鼠活跃度</small>
+        </article>
+        <article class="card">
+          <h2>在座/休息</h2>
+          <p id="seated" class="metric-value">0 min</p>
+          <small>连续在座时间 / 最近一次休息时长</small>
+        </article>
+      </section>
+
+      <section class="chart-panel">
+        <h3>得分与在座趋势</h3>
+        <canvas id="trend-chart" height="160"></canvas>
+      </section>
+
+      <section class="details">
+        <h3>原始指标</h3>
+        <table>
+          <tbody>
+            <tr>
+              <th>activity_sum</th>
+              <td id="activity-sum">0</td>
+            </tr>
+            <tr>
+              <th>normalized_activity</th>
+              <td id="normalized-activity">0</td>
+            </tr>
+            <tr>
+              <th>seated_minutes</th>
+              <td id="seated-minutes">0</td>
+            </tr>
+            <tr>
+              <th>break_minutes</th>
+              <td id="break-minutes">0</td>
+            </tr>
+            <tr>
+              <th>presence_confidence</th>
+              <td id="presence-confidence">0</td>
+            </tr>
+            <tr>
+              <th>posture_score</th>
+              <td id="posture-score">0</td>
+            </tr>
+            <tr>
+              <th>posture_state</th>
+              <td id="posture-state">unknown</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="/static/js/app.js?v=1" defer></script>
+  </body>
+</html>

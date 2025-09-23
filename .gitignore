@@ -1,0 +1,35 @@
+# Python 编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+.venv/
+venv/
+env/
+.Python
+
+# 构建/打包产物
+build/
+dist/
+*.egg-info/
+*.egg
+*.log
+*.app
+*.dmg
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# 编辑器/系统文件
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# uv 缓存
+.uv/
+uv.lock.lock

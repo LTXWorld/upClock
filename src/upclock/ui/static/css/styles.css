@@ -1,0 +1,143 @@
+:root {
+  color-scheme: dark light;
+  --bg: #0f1115;
+  --card-bg: rgba(255, 255, 255, 0.06);
+  --text-primary: #f5f7fa;
+  --text-secondary: #9aa0ac;
+  --accent: #4f7cff;
+  --success: #29c17e;
+  --warning: #f7b851;
+  --danger: #ef5b5b;
+  --border: rgba(255, 255, 255, 0.08);
+  font-family: 'SF Pro Text', 'Segoe UI', Tahoma, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(120% 120% at 50% 0%, #1b1f2a, #0b0d12);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+.top-bar {
+  padding: 24px 5vw 16px;
+  background: linear-gradient(135deg, rgba(79, 124, 255, 0.35), rgba(52, 88, 199, 0.2));
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 10px 30px rgba(18, 22, 34, 0.35);
+}
+
+.top-bar h1 {
+  margin: 0;
+  font-size: 1.6rem;
+}
+
+.subtitle {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.content {
+  padding: 32px 5vw 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 20px 35px rgba(10, 12, 21, 0.4);
+}
+
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+}
+
+.metric-value {
+  font-size: 2.4rem;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 1.1rem;
+  letter-spacing: 0.05em;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+}
+
+.state-active {
+  background: rgba(41, 193, 126, 0.15);
+  border-color: rgba(41, 193, 126, 0.4);
+  color: var(--success);
+}
+
+.state-short_break {
+  background: rgba(247, 184, 81, 0.12);
+  border-color: rgba(247, 184, 81, 0.4);
+  color: var(--warning);
+}
+
+.state-prolonged_seated {
+  background: rgba(239, 91, 91, 0.14);
+  border-color: rgba(239, 91, 91, 0.45);
+  color: var(--danger);
+}
+
+.chart-panel,
+.details {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px;
+  backdrop-filter: blur(12px);
+}
+
+.chart-panel h3,
+.details h3 {
+  margin-top: 0;
+  margin-bottom: 16px;
+  color: var(--text-secondary);
+}
+
+.details table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.details th,
+.details td {
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.details th {
+  color: var(--text-secondary);
+  text-align: left;
+  font-weight: 400;
+  width: 200px;
+}
+
+@media (max-width: 640px) {
+  .metric-value {
+    font-size: 2rem;
+  }
+}
