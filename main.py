@@ -52,11 +52,25 @@ def main() -> None:
         logging.getLogger(__name__).info("系统唤醒，恢复久坐计算")
         shared_state.set_system_sleeping(False)
 
+    def flow_state_provider() -> tuple[bool, float]:
+        return shared_state.get_flow_mode_state()
+
+    def activate_flow_mode(duration_minutes: float) -> None:
+        logging.getLogger(__name__).info("心流模式开启 %.1f 分钟", duration_minutes)
+        shared_state.activate_flow_mode(duration_minutes)
+
+    def cancel_flow_mode() -> None:
+        logging.getLogger(__name__).info("心流模式结束")
+        shared_state.cancel_flow_mode()
+
     run_status_bar_app(
         snapshot_provider,
         notification_provider,
         on_system_sleep=handle_system_sleep,
         on_system_wake=handle_system_wake,
+        flow_state_provider=flow_state_provider,
+        activate_flow_mode=activate_flow_mode,
+        cancel_flow_mode=cancel_flow_mode,
     )
 
 

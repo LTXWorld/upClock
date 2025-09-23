@@ -13,6 +13,10 @@ try:  # pragma: no cover - 仅在 macOS GUI 环境下可用
     import objc  # type: ignore
     from Cocoa import (  # type: ignore
         NSApp,
+        NSAlert,
+        NSAlert,
+        NSAlertFirstButtonReturn,
+        NSAlertSecondButtonReturn,
         NSColor,
         NSFont,
         NSInformationalRequest,
@@ -21,6 +25,7 @@ try:  # pragma: no cover - 仅在 macOS GUI 环境下可用
         NSMaxYEdge,
         NSPopover,
         NSPopoverBehaviorTransient,
+        NSSlider,
         NSTextField,
         NSView,
         NSViewController,
@@ -28,6 +33,9 @@ try:  # pragma: no cover - 仅在 macOS GUI 环境下可用
 except Exception:  # pragma: no cover - 测试环境/非 GUI 环境
     objc = None  # type: ignore
     NSApp = None  # type: ignore
+    NSAlert = None  # type: ignore
+    NSAlertFirstButtonReturn = 1000  # type: ignore
+    NSAlertSecondButtonReturn = 1001  # type: ignore
     NSColor = None  # type: ignore
     NSFont = None  # type: ignore
     NSInformationalRequest = 0  # type: ignore
@@ -36,6 +44,7 @@ except Exception:  # pragma: no cover - 测试环境/非 GUI 环境
     NSMaxYEdge = 0  # type: ignore
     NSPopover = None  # type: ignore
     NSPopoverBehaviorTransient = 0  # type: ignore
+    NSSlider = None  # type: ignore
     NSTextField = None  # type: ignore
     NSView = None  # type: ignore
     NSViewController = None  # type: ignore
@@ -53,6 +62,7 @@ class StatusSnapshot:
     break_minutes: float
     updated_at: float
     next_reminder_minutes: Optional[float] = None
+    flow_mode_minutes: Optional[float] = None
 
 
 @dataclass
@@ -104,6 +114,28 @@ else:  # pragma: no cover - 非 GUI 环境无需控制器
             return self
 
 
+if objc is not None and NSSlider is not None and NSTextField is not None:  # pragma: no cover
+
+    class _FlowSliderDelegate(objc.lookUpClass("NSObject")):
+        """帮助更新心流滑块数值显示。"""
+
+        def initWithLabel_(self, label):  # type: ignore[override]
+            self = objc.super(_FlowSliderDelegate, self).init()
+            if self is None:
+                return None
+            self._label = label
+            return self
+
+        def sliderChanged_(self, sender):  # type: ignore[override]
+            value = sender.doubleValue()
+            if self._label is not None:
+                self._label.setStringValue_(f"{value:.0f} 分钟")
+
+else:  # pragma: no cover - 非 GUI 环境无需滑块
+
+    _FlowSliderDelegate = None  # type: ignore
+
+
 class StatusBarApp(rumps.App):
     """状态栏应用，周期性读取后台状态。"""
 
@@ -113,6 +145,9 @@ class StatusBarApp(rumps.App):
         notification_provider: Callable[[], Optional[NotificationMessage]],
         on_system_sleep: Optional[Callable[[], None]] = None,
         on_system_wake: Optional[Callable[[], None]] = None,
+        flow_state_provider: Optional[Callable[[], tuple[bool, float]]] = None,
+        activate_flow_mode: Optional[Callable[[float], None]] = None,
+        cancel_flow_mode: Optional[Callable[[], None]] = None,
     ) -> None:
         _ensure_info_plist()
         super().__init__(name="upClock", title="⌚", quit_button=None)
@@ -120,13 +155,18 @@ class StatusBarApp(rumps.App):
         self._notification_provider = notification_provider
         self._on_system_sleep = on_system_sleep
         self._on_system_wake = on_system_wake
+        self._flow_state_provider = flow_state_provider
+        self._activate_flow_mode = activate_flow_mode
+        self._cancel_flow_mode = cancel_flow_mode
         self._banner_popover = None
         self._banner_timer: Optional[rumps.Timer] = None
+        self._flow_menu_item = rumps.MenuItem(title="心流模式：关闭", callback=self._handle_flow_mode)
         self.menu = [
             rumps.MenuItem(title="当前状态", callback=None),
             rumps.MenuItem(title="活跃得分", callback=None),
             rumps.MenuItem(title="在座/休息", callback=None),
             rumps.MenuItem(title="下一次提醒", callback=None),
+            self._flow_menu_item,
             None,
             rumps.MenuItem("打开仪表盘", callback=self._open_dashboard),
             rumps.MenuItem("退出", callback=self._quit_app),
@@ -158,6 +198,7 @@ class StatusBarApp(rumps.App):
                 self.menu["下一次提醒"].title = (
                     f"下一次提醒：{max(0.0, snapshot.next_reminder_minutes):.1f} 分钟"
                 )
+        self._update_flow_menu(snapshot.flow_mode_minutes)
 
         notification = self._notification_provider()
         if notification is not None:
@@ -214,6 +255,48 @@ class StatusBarApp(rumps.App):
         if self._on_system_wake is not None:
             events.on_wake(self._handle_system_wake)
 
+    def _update_flow_menu(self, remaining: Optional[float]) -> None:
+        if self._flow_state_provider is None:
+            self._flow_menu_item.title = "心流模式：未配置"
+            self._flow_menu_item.set_callback(None)
+            return
+
+        self._flow_menu_item.set_callback(self._handle_flow_mode)
+        active, provider_remaining = self._flow_state_provider()
+        minutes = remaining if remaining is not None else provider_remaining
+        if active:
+            minutes = max(minutes, 0.0)
+            self._flow_menu_item.title = f"心流模式：剩余 {minutes:.1f} 分"
+        else:
+            self._flow_menu_item.title = "开启心流模式…"
+
+    def _handle_flow_mode(self, _sender: rumps.MenuItem) -> None:
+        if self._flow_state_provider is None:
+            rumps.alert("未配置心流模式", "当前版本未提供心流模式控制。")
+            return
+
+        active, remaining = self._flow_state_provider()
+        if active:
+            if self._cancel_flow_mode is None:
+                return
+            if self._confirm_end_flow_mode(remaining):
+                try:
+                    self._cancel_flow_mode()
+                except Exception:
+                    rumps.alert("操作失败", "无法结束心流模式，请查看日志。")
+            return
+
+        if self._activate_flow_mode is None:
+            return
+
+        minutes = self._prompt_flow_duration(default_minutes=60.0)
+        if minutes is None:
+            return
+        try:
+            self._activate_flow_mode(minutes)
+        except Exception:
+            rumps.alert("操作失败", "无法开启心流模式，请查看日志。")
+
     def _handle_system_sleep(self, *_args, **_kwargs) -> None:
         if self._on_system_sleep is not None:
             try:
@@ -227,6 +310,98 @@ class StatusBarApp(rumps.App):
                 self._on_system_wake()
             except Exception:  # pragma: no cover
                 rumps.logger.error("处理系统唤醒事件失败", exc_info=True)
+
+    def _prompt_flow_duration(self, default_minutes: float = 60.0) -> Optional[float]:
+        """弹出紧凑窗口询问心流模式时长。"""
+
+        if NSAlert is not None and NSSlider is not None and NSTextField is not None and _FlowSliderDelegate is not None:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("开启心流模式")
+            alert.setInformativeText_("通过滚轮选择持续时间：")
+            alert.addButtonWithTitle_("开始")
+            alert.addButtonWithTitle_("取消")
+
+            width = 220.0
+            container = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, 70.0))
+
+            value_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, 40.0, width, 22.0))
+            value_label.setStringValue_(f"{default_minutes:.0f} 分钟")
+            value_label.setEditable_(False)
+            value_label.setBordered_(False)
+            value_label.setBezeled_(False)
+            value_label.setDrawsBackground_(False)
+            value_label.setAlignment_(1)  # center
+
+            slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0.0, 10.0, width, 24.0))
+            slider.setMinValue_(15.0)
+            slider.setMaxValue_(240.0)
+            slider.setDoubleValue_(max(15.0, min(240.0, default_minutes)))
+            slider.setNumberOfTickMarks_(16)
+            slider.setAllowsTickMarkValuesOnly_(True)
+            slider.setContinuous_(True)
+
+            delegate = _FlowSliderDelegate.alloc().initWithLabel_(value_label)
+            slider.setTarget_(delegate)
+            slider.setAction_(objc.selector(_FlowSliderDelegate.sliderChanged_, signature=b"v@:@"))
+            delegate.sliderChanged_(slider)
+            try:  # 保持引用，防止被 GC
+                objc.setAssociatedObject(
+                    slider,
+                    b"_upclock_flow_delegate",
+                    delegate,
+                    getattr(objc, "OBJC_ASSOCIATION_RETAIN", 0),
+                )
+            except Exception:  # pragma: no cover - setAssociatedObject 不可用时忽略
+                pass
+
+            container.setAutoresizesSubviews_(True)
+            slider.setAutoresizingMask_(2)  # width resizing
+
+            container.addSubview_(value_label)
+            container.addSubview_(slider)
+            alert.setAccessoryView_(container)
+
+            response = alert.runModal()
+            if response not in (NSAlertFirstButtonReturn, 1, 1000):
+                return None
+            minutes = slider.doubleValue()
+            return max(5.0, minutes)
+
+        window = rumps.Window(
+            message="设置心流模式时长（分钟）：",
+            title="开启心流模式",
+            default_text=f"{default_minutes:.0f}",
+            ok="开始",
+            cancel="取消",
+            dimensions=(200, 60),
+        )
+        window.icon = None
+        response = window.run()
+        if response.clicked != 1:
+            return None
+        text = response.text.strip()
+
+        if not text:
+            minutes = default_minutes
+        else:
+            try:
+                minutes = float(text)
+            except ValueError:
+                rumps.alert("输入无效", "请输入数字分钟数，例如 60。")
+                return None
+
+        return max(1.0, minutes)
+
+    def _confirm_end_flow_mode(self, remaining: float) -> bool:
+        """确认是否结束心流模式。"""
+
+        confirm = rumps.alert(
+            "结束心流模式",
+            f"心流模式剩余 {remaining:.1f} 分钟，是否提前结束？",
+            ok="结束",
+            cancel="继续",
+        )
+        return confirm == 1
 
     def _show_transient_banner(self, text: str) -> None:
         """在状态栏图标下方短暂展示提醒文本。"""
@@ -289,12 +464,18 @@ def run_status_bar_app(
     notification_provider: Callable[[], Optional[NotificationMessage]],
     on_system_sleep: Optional[Callable[[], None]] = None,
     on_system_wake: Optional[Callable[[], None]] = None,
+    flow_state_provider: Optional[Callable[[], tuple[bool, float]]] = None,
+    activate_flow_mode: Optional[Callable[[float], None]] = None,
+    cancel_flow_mode: Optional[Callable[[], None]] = None,
 ) -> None:
     app = StatusBarApp(
         snapshot_provider,
         notification_provider,
         on_system_sleep=on_system_sleep,
         on_system_wake=on_system_wake,
+        flow_state_provider=flow_state_provider,
+        activate_flow_mode=activate_flow_mode,
+        cancel_flow_mode=cancel_flow_mode,
     )
     app.run()
 

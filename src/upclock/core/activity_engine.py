@@ -26,6 +26,7 @@ class ActivitySnapshot:
     score: float
     state: ActivityState
     metrics: Dict[str, Union[float, str]]
+    flow_mode_remaining: Optional[float] = None
 
 
 class SignalBufferReader(Protocol):

@@ -42,6 +42,7 @@ class SharedState:
     notification: Optional[NotificationMessage] = None
     system_sleeping: bool = False
     system_state_changed_at: float = 0.0
+    flow_mode_until: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def set(
@@ -84,6 +85,27 @@ class SharedState:
             message = self.notification
             self.notification = None
             return message
+
+    def activate_flow_mode(self, duration_minutes: float) -> None:
+        duration_seconds = max(0.0, float(duration_minutes)) * 60.0
+        with self._lock:
+            if duration_seconds <= 0:
+                self.flow_mode_until = 0.0
+            else:
+                self.flow_mode_until = time.time() + duration_seconds
+
+    def cancel_flow_mode(self) -> None:
+        with self._lock:
+            self.flow_mode_until = 0.0
+
+    def get_flow_mode_state(self) -> tuple[bool, float]:
+        now = time.time()
+        with self._lock:
+            remaining = max(0.0, self.flow_mode_until - now)
+            if remaining <= 0.0:
+                self.flow_mode_until = 0.0
+                return False, 0.0
+            return True, remaining / 60.0
 
 
 async def run_backend(shared: SharedState) -> None:
@@ -154,6 +176,7 @@ async def run_backend(shared: SharedState) -> None:
     try:
         while True:
             sleeping = shared.is_system_sleeping()
+            flow_active, flow_remaining = shared.get_flow_mode_state()
 
             if sleeping:
                 if not was_sleeping:
@@ -174,7 +197,10 @@ async def run_backend(shared: SharedState) -> None:
                         "posture_state": "sleeping",
                         "score": 1.0,
                         "system_state": "sleeping",
+                        "flow_mode_active": 1.0 if flow_active else 0.0,
+                        "flow_mode_remaining": float(flow_remaining if flow_active else 0.0),
                     },
+                    flow_mode_remaining=flow_remaining if flow_active else None,
                 )
 
                 shared.set(
@@ -186,6 +212,7 @@ async def run_backend(shared: SharedState) -> None:
                         break_minutes=0.0,
                         updated_at=now,
                         next_reminder_minutes=None,
+                        flow_mode_minutes=flow_remaining if flow_active else None,
                     ),
                     notification=None,
                 )
@@ -202,6 +229,9 @@ async def run_backend(shared: SharedState) -> None:
                 was_sleeping = False
 
             snapshot = engine.compute_snapshot()
+            snapshot.flow_mode_remaining = flow_remaining if flow_active else None
+            snapshot.metrics["flow_mode_active"] = 1.0 if flow_active else 0.0
+            snapshot.metrics["flow_mode_remaining"] = float(flow_remaining if flow_active else 0.0)
 
             probe_pending = float(snapshot.metrics.get("visual_probe_pending", 0.0) or 0.0) >= 0.5
             if probe_pending and vision_adapter is not None:
@@ -216,7 +246,7 @@ async def run_backend(shared: SharedState) -> None:
             next_reminder_minutes: Optional[float] = None
             notification: Optional[NotificationMessage] = None
 
-            if config.notifications_enabled:
+            if config.notifications_enabled and not flow_active:
                 if snapshot.state is ActivityState.PROLONGED_SEATED:
                     should_notify = False
                     if last_notification_at is None:
@@ -250,6 +280,7 @@ async def run_backend(shared: SharedState) -> None:
                     break_minutes=break_minutes,
                     updated_at=now,
                     next_reminder_minutes=next_reminder_minutes,
+                    flow_mode_minutes=flow_remaining if flow_active else None,
                 ),
                 notification=notification,
             )
