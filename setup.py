@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -41,6 +42,8 @@ PLIST = {
     "NSHumanReadableCopyright": "© 2025 upClock contributors",
 }
 
+INCLUDE_VISION = int(os.environ.get("INCLUDE_VISION", "1"))
+
 OPTIONS = {
     "argv_emulation": False,
     "packages": ["upclock", "anyio"],
@@ -70,6 +73,17 @@ OPTIONS = {
     "plist": PLIST,
     "optimize": 0,
 }
+
+if INCLUDE_VISION:
+    OPTIONS["includes"].extend([
+        "cv2",
+        "mediapipe",
+        "onnxruntime",
+        "numpy",
+    ])
+else:
+    PLIST["CFBundleDisplayName"] = "upClock Light"
+    PLIST["CFBundleName"] = "upClock Light"
 
 
 setup(

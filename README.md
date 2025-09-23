@@ -121,19 +121,32 @@
 
 使用 `py2app` 可以将 upClock 打包为原生的 `.app`，便于分享给其他 macOS 用户：
 
-1. **同步打包依赖**（包含 py2app 与视觉模块）
+### 全量版（包含视觉模块）
+
+1. 同步依赖并构建：
    ```bash
    uv sync --extra macos --extra vision
-   ```
-
-2. **执行打包脚本**
-   ```bash
    bash scripts/build_macos_app.sh
    ```
-   - 脚本会清理 `build/` 与 `dist/`，随后运行 `python setup.py py2app`。
-   - 构建完成后，`.app` 位于 `dist/upClock.app`。
+   - 产物：`dist/upClock.app`，包含摄像头姿态检测所需的 OpenCV/MediaPipe/ONNXRuntime。
 
-3. **首次发布建议**
+### 轻量版（仅键鼠 + 状态栏 + 仪表盘）
+
+1. 同步依赖并构建：
+   ```bash
+   uv sync --extra macos
+   bash scripts/build_macos_app_light.sh
+   ```
+   - 产物同样位于 `dist/upClock.app`，但不包含视觉依赖，体积大幅缩减。
+   - 轻量版打包时 `CFBundleName` 会显示为 “upClock Light”，避免与完整版混淆。
+
+### 发布建议
+
+1. 双击运行生成的 `.app`，确认状态栏图标/仪表盘/通知都正常工作。
+2. 若计划对外分发，可将 `.app` 打包为 ZIP，或使用 `hdiutil create` 生成 DMG。
+3. 公共发布时请考虑使用开发者证书进行 `codesign` 与 Apple notarization，以减少 Gatekeeper 提示。
+
+> **提示**：完整版与轻量版共用同一份代码，仅在打包脚本中通过环境变量控制是否包含视觉模块。运行轻量版时，缺少视觉依赖会让摄像头功能自动禁用，其余体验保持一致。
    - 双击运行 `dist/upClock.app`，确认状态栏图标/仪表盘/通知都正常工作。
    - 若计划对外分发，可将 `dist/upClock.app` 打包为 ZIP，或使用 `hdiutil create` 生成 DMG。
    - 公共发布时请考虑使用开发者证书进行 `codesign` 与 Apple notarization，以减少 Gatekeeper 提示。
