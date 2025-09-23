@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -30,8 +31,8 @@ def create_app(
         if _engine is None:
             _engine = ActivityEngine(_buffer)
 
-    static_dir = Path(__file__).resolve().parent / "static"
-    if static_dir.exists():
+    static_dir = _resolve_static_directory()
+    if static_dir is not None:
         app.mount("/static", StaticFiles(directory=str(static_dir), html=True), name="static")
 
         @app.get("/", tags=["ui"], include_in_schema=False)
@@ -71,3 +72,24 @@ def create_app(
         }
 
     return app
+
+
+def _resolve_static_directory() -> Optional[Path]:
+    """在开发与打包环境下查找静态资源目录。"""
+
+    candidates: list[Path] = []
+    module_static = Path(__file__).resolve().parent / "static"
+    candidates.append(module_static)
+
+    resource_path = os.environ.get("RESOURCEPATH")
+    if resource_path:
+        bundle_static = Path(resource_path) / "static"
+        candidates.append(bundle_static)
+        bundle_nested = Path(resource_path) / "upclock" / "ui" / "static"
+        candidates.append(bundle_nested)
+
+    for path in candidates:
+        if path.exists():
+            return path
+
+    return None

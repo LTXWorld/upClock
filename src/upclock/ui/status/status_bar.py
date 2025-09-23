@@ -113,7 +113,7 @@ class StatusBarApp(rumps.App):
         notification_provider: Callable[[], Optional[NotificationMessage]],
     ) -> None:
         _ensure_info_plist()
-        super().__init__(name="upClock", title="⌚")
+        super().__init__(name="upClock", title="⌚", quit_button=None)
         self._snapshot_provider = snapshot_provider
         self._notification_provider = notification_provider
         self._banner_popover = None

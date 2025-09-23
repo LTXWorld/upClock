@@ -18,6 +18,9 @@ dist/
 *.app
 *.dmg
 
+# py2app 临时文件
+_py2app_zlib_stub.py
+
 # 测试与覆盖率
 .pytest_cache/
 .coverage

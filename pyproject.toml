@@ -25,6 +25,7 @@ vision = [
 ]
 macos = [
     "py2app>=0.28",
+    "setuptools==65.7.0",
 ]
 
 [tool.pytest.ini_options]
