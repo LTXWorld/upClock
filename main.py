@@ -17,6 +17,7 @@ if SRC_DIR.exists() and str(SRC_DIR) not in sys.path:
 
 from scripts.dev_server import main as run_dev_server
 from upclock.adapters.vision.permissions import configure_opencv_authorization, ensure_camera_permission
+from upclock.config_store import UserSettings
 from upclock.service import SharedState, start_backend_in_thread
 from upclock.ui.status import NotificationMessage, StatusSnapshot, run_status_bar_app
 
@@ -63,6 +64,33 @@ def main() -> None:
         logging.getLogger(__name__).info("心流模式结束")
         shared_state.cancel_flow_mode()
 
+    def snooze_state_provider() -> tuple[bool, float]:
+        return shared_state.get_snooze_state()
+
+    def activate_snooze(duration_minutes: float) -> None:
+        logging.getLogger(__name__).info("延后提醒 %.1f 分钟", duration_minutes)
+        shared_state.activate_snooze(duration_minutes)
+
+    def cancel_snooze() -> None:
+        logging.getLogger(__name__).info("取消延后提醒")
+        shared_state.cancel_snooze()
+
+    def settings_provider() -> Optional[UserSettings]:
+        return shared_state.get_current_settings()
+
+    def update_settings(settings: UserSettings) -> None:
+        logging.getLogger(__name__).info(
+            "更新提醒设置: 久坐=%s, 冷却=%s, 静默=%s",
+            settings.prolonged_seated_minutes,
+            settings.notification_cooldown_minutes,
+            settings.quiet_hours,
+        )
+        shared_state.queue_settings_update(settings)
+
+    def refresh_activity() -> None:
+        logging.getLogger(__name__).info("手动刷新久坐计时")
+        shared_state.request_manual_reset()
+
     run_status_bar_app(
         snapshot_provider,
         notification_provider,
@@ -71,6 +99,12 @@ def main() -> None:
         flow_state_provider=flow_state_provider,
         activate_flow_mode=activate_flow_mode,
         cancel_flow_mode=cancel_flow_mode,
+        snooze_state_provider=snooze_state_provider,
+        activate_snooze=activate_snooze,
+        cancel_snooze=cancel_snooze,
+        settings_provider=settings_provider,
+        update_settings=update_settings,
+        refresh_callback=refresh_activity,
     )
 
 

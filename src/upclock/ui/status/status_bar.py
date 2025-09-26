@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -13,7 +14,6 @@ try:  # pragma: no cover - 仅在 macOS GUI 环境下可用
     import objc  # type: ignore
     from Cocoa import (  # type: ignore
         NSApp,
-        NSAlert,
         NSAlert,
         NSAlertFirstButtonReturn,
         NSAlertSecondButtonReturn,
@@ -29,6 +29,11 @@ try:  # pragma: no cover - 仅在 macOS GUI 环境下可用
         NSTextField,
         NSView,
         NSViewController,
+    )
+    from Foundation import (  # type: ignore
+        NSUserNotification,
+        NSUserNotificationCenter,
+        NSUserNotificationDefaultSoundName,
     )
 except Exception:  # pragma: no cover - 测试环境/非 GUI 环境
     objc = None  # type: ignore
@@ -48,7 +53,11 @@ except Exception:  # pragma: no cover - 测试环境/非 GUI 环境
     NSTextField = None  # type: ignore
     NSView = None  # type: ignore
     NSViewController = None  # type: ignore
+    NSUserNotification = None  # type: ignore
+    NSUserNotificationCenter = None  # type: ignore
+    NSUserNotificationDefaultSoundName = None  # type: ignore
 
+from upclock.config_store import UserSettings
 from upclock.core.activity_engine import ActivitySnapshot, ActivityState
 
 
@@ -63,6 +72,8 @@ class StatusSnapshot:
     updated_at: float
     next_reminder_minutes: Optional[float] = None
     flow_mode_minutes: Optional[float] = None
+    snooze_minutes: Optional[float] = None
+    quiet_minutes: Optional[float] = None
 
 
 @dataclass
@@ -136,6 +147,19 @@ else:  # pragma: no cover - 非 GUI 环境无需滑块
     _FlowSliderDelegate = None  # type: ignore
 
 
+if objc is not None and NSUserNotificationCenter is not None:  # pragma: no cover
+
+    class _NotificationCenterDelegate(objc.lookUpClass("NSObject")):
+        """保证应用前台时仍可展示系统通知。"""
+
+        def userNotificationCenter_shouldPresentNotification_(self, _center, _notification):  # type: ignore[override]
+            return True
+
+else:  # pragma: no cover - 非 GUI 环境无需通知代理
+
+    _NotificationCenterDelegate = None  # type: ignore
+
+
 class StatusBarApp(rumps.App):
     """状态栏应用，周期性读取后台状态。"""
 
@@ -148,6 +172,12 @@ class StatusBarApp(rumps.App):
         flow_state_provider: Optional[Callable[[], tuple[bool, float]]] = None,
         activate_flow_mode: Optional[Callable[[float], None]] = None,
         cancel_flow_mode: Optional[Callable[[], None]] = None,
+        snooze_state_provider: Optional[Callable[[], tuple[bool, float]]] = None,
+        activate_snooze: Optional[Callable[[float], None]] = None,
+        cancel_snooze: Optional[Callable[[], None]] = None,
+        settings_provider: Optional[Callable[[], Optional[UserSettings]]] = None,
+        update_settings: Optional[Callable[[UserSettings], None]] = None,
+        refresh_callback: Optional[Callable[[], None]] = None,
     ) -> None:
         _ensure_info_plist()
         super().__init__(name="upClock", title="⌚", quit_button=None)
@@ -158,15 +188,36 @@ class StatusBarApp(rumps.App):
         self._flow_state_provider = flow_state_provider
         self._activate_flow_mode = activate_flow_mode
         self._cancel_flow_mode = cancel_flow_mode
+        self._snooze_state_provider = snooze_state_provider
+        self._activate_snooze = activate_snooze
+        self._cancel_snooze = cancel_snooze
+        self._settings_provider = settings_provider
+        self._update_settings = update_settings
+        self._refresh_callback = refresh_callback
+        self._notification_delegate_ref = None
         self._banner_popover = None
         self._banner_timer: Optional[rumps.Timer] = None
         self._flow_menu_item = rumps.MenuItem(title="心流模式：关闭", callback=self._handle_flow_mode)
+        self._snooze_menu = rumps.MenuItem("延后提醒")
+        self._snooze_5 = rumps.MenuItem("延后 5 分钟", lambda _: self._handle_snooze(5))
+        self._snooze_15 = rumps.MenuItem("延后 15 分钟", lambda _: self._handle_snooze(15))
+        self._snooze_30 = rumps.MenuItem("延后 30 分钟", lambda _: self._handle_snooze(30))
+        self._cancel_snooze_item = rumps.MenuItem("取消延后", self._handle_cancel_snooze)
+        self._snooze_menu.add(self._snooze_5)
+        self._snooze_menu.add(self._snooze_15)
+        self._snooze_menu.add(self._snooze_30)
+        self._snooze_menu.add(self._cancel_snooze_item)
+        self._settings_item = rumps.MenuItem("提醒设置…", self._handle_open_settings)
+        self._refresh_item = rumps.MenuItem("刷新久坐计时", self._handle_manual_refresh)
         self.menu = [
             rumps.MenuItem(title="当前状态", callback=None),
             rumps.MenuItem(title="活跃得分", callback=None),
             rumps.MenuItem(title="在座/休息", callback=None),
             rumps.MenuItem(title="下一次提醒", callback=None),
+            self._refresh_item,
             self._flow_menu_item,
+            self._snooze_menu,
+            self._settings_item,
             None,
             rumps.MenuItem("打开仪表盘", callback=self._open_dashboard),
             rumps.MenuItem("退出", callback=self._quit_app),
@@ -175,6 +226,7 @@ class StatusBarApp(rumps.App):
         self._last_snapshot: Optional[StatusSnapshot] = None
         if self._on_system_sleep or self._on_system_wake:
             self._register_power_events()
+        self._ensure_notification_delegate()
 
     def run(self, *args, **kwargs):  # type: ignore[override]
         self._poll_timer.start()
@@ -192,13 +244,19 @@ class StatusBarApp(rumps.App):
         self.menu["活跃得分"].title = f"活跃得分：{snapshot.score:.2f}"
         self.menu["在座/休息"].title = f"在座：{snapshot.seated_minutes:.1f} 分钟 / 休息：{snapshot.break_minutes:.1f}"
         if "下一次提醒" in self.menu:
-            if snapshot.next_reminder_minutes is None:
-                self.menu["下一次提醒"].title = "下一次提醒：--"
+            if snapshot.quiet_minutes is not None:
+                label = f"静默中：{max(0.0, snapshot.quiet_minutes):.1f} 分"
+            elif snapshot.snooze_minutes is not None:
+                label = f"延后：{max(0.0, snapshot.snooze_minutes):.1f} 分"
+            elif snapshot.flow_mode_minutes is not None:
+                label = f"心流：{max(0.0, snapshot.flow_mode_minutes):.1f} 分"
+            elif snapshot.next_reminder_minutes is not None:
+                label = f"下一次提醒：{max(0.0, snapshot.next_reminder_minutes):.1f} 分"
             else:
-                self.menu["下一次提醒"].title = (
-                    f"下一次提醒：{max(0.0, snapshot.next_reminder_minutes):.1f} 分钟"
-                )
+                label = "下一次提醒：--"
+            self.menu["下一次提醒"].title = label
         self._update_flow_menu(snapshot.flow_mode_minutes)
+        self._update_snooze_menu(snapshot.snooze_minutes)
 
         notification = self._notification_provider()
         if notification is not None:
@@ -212,9 +270,39 @@ class StatusBarApp(rumps.App):
         return "👨🏻‍💻"
 
     def _show_notification(self, message: NotificationMessage) -> None:
-        rumps.notification(message.title, message.subtitle, message.body)
+        delivered = self._deliver_user_notification(message)
+        if not delivered:
+            rumps.notification(message.title, message.subtitle, message.body)
         self._bounce_icon()
-        self._show_transient_banner(message.body)
+        if not delivered:
+            self._show_transient_banner(message.body)
+
+    def _deliver_user_notification(self, message: NotificationMessage) -> bool:
+        if NSUserNotificationCenter is None or NSUserNotification is None:
+            return False
+        try:
+            center = NSUserNotificationCenter.defaultUserNotificationCenter()
+            notification = NSUserNotification.alloc().init()
+            title = message.title or "upClock 提醒"
+            notification.setTitle_(title)
+            if message.subtitle:
+                notification.setSubtitle_(message.subtitle)
+            body = message.body or ""
+            notification.setInformativeText_(body)
+            if NSUserNotificationDefaultSoundName is not None:
+                notification.setSoundName_(NSUserNotificationDefaultSoundName)
+            else:
+                notification.setSoundName_("NSUserNotificationDefaultSoundName")
+            identifier = f"upclock-{time.time()}"
+            if hasattr(notification, "setIdentifier_"):
+                notification.setIdentifier_(identifier)
+            if hasattr(notification, "setHasActionButton_"):
+                notification.setHasActionButton_(False)
+            center.deliverNotification_(notification)
+            return True
+        except Exception:
+            rumps.logger.error("系统通知发送失败", exc_info=True)
+            return False
 
     def _state_label(self, state: Optional[ActivityState]) -> str:
         mapping = {
@@ -255,6 +343,19 @@ class StatusBarApp(rumps.App):
         if self._on_system_wake is not None:
             events.on_wake(self._handle_system_wake)
 
+    def _ensure_notification_delegate(self) -> None:
+        if NSUserNotificationCenter is None or _NotificationCenterDelegate is None:
+            return
+        if self._notification_delegate_ref is not None:
+            return
+        try:
+            center = NSUserNotificationCenter.defaultUserNotificationCenter()
+            delegate = _NotificationCenterDelegate.alloc().init()
+            center.setDelegate_(delegate)
+            self._notification_delegate_ref = delegate
+        except Exception:  # pragma: no cover - 设置失败时忽略
+            self._notification_delegate_ref = None
+
     def _update_flow_menu(self, remaining: Optional[float]) -> None:
         if self._flow_state_provider is None:
             self._flow_menu_item.title = "心流模式：未配置"
@@ -269,6 +370,29 @@ class StatusBarApp(rumps.App):
             self._flow_menu_item.title = f"心流模式：剩余 {minutes:.1f} 分"
         else:
             self._flow_menu_item.title = "开启心流模式…"
+
+    def _update_snooze_menu(self, remaining: Optional[float]) -> None:
+        if self._snooze_state_provider is None:
+            self._snooze_menu.title = "延后提醒：未配置"
+            for item in (self._snooze_5, self._snooze_15, self._snooze_30, self._cancel_snooze_item):
+                item.set_callback(None)
+            return
+
+        self._snooze_5.set_callback(lambda _: self._handle_snooze(5))
+        self._snooze_15.set_callback(lambda _: self._handle_snooze(15))
+        self._snooze_30.set_callback(lambda _: self._handle_snooze(30))
+
+        active, provider_remaining = self._snooze_state_provider()
+        minutes = remaining if remaining is not None else provider_remaining
+        if active:
+            minutes = max(minutes, 0.0)
+            self._snooze_menu.title = f"延后提醒：剩余 {minutes:.1f} 分"
+            self._cancel_snooze_item.title = "取消延后"
+            self._cancel_snooze_item.set_callback(self._handle_cancel_snooze)
+        else:
+            self._snooze_menu.title = "延后提醒"
+            self._cancel_snooze_item.title = "取消延后 (无)"
+            self._cancel_snooze_item.set_callback(lambda _: None)
 
     def _handle_flow_mode(self, _sender: rumps.MenuItem) -> None:
         if self._flow_state_provider is None:
@@ -296,6 +420,241 @@ class StatusBarApp(rumps.App):
             self._activate_flow_mode(minutes)
         except Exception:
             rumps.alert("操作失败", "无法开启心流模式，请查看日志。")
+
+    def _handle_snooze(self, minutes: float) -> None:
+        if self._activate_snooze is None:
+            rumps.alert("未配置延后提醒", "当前版本未提供延后提醒控制。")
+            return
+        try:
+            self._activate_snooze(minutes)
+        except Exception:
+            rumps.alert("操作失败", "无法设置延后提醒，请查看日志。")
+
+    def _handle_cancel_snooze(self, _sender: rumps.MenuItem) -> None:
+        if self._cancel_snooze is None:
+            return
+        if self._snooze_state_provider is not None:
+            active, _remaining = self._snooze_state_provider()
+            if not active:
+                rumps.alert("当前无延后提醒", "没有待取消的延后提醒。")
+                return
+        try:
+            self._cancel_snooze()
+        except Exception:
+            rumps.alert("操作失败", "无法取消延后提醒，请查看日志。")
+
+    def _handle_open_settings(self, _sender: rumps.MenuItem) -> None:
+        if self._settings_provider is None or self._update_settings is None:
+            rumps.alert("未配置设置面板", "当前版本未提供提醒设置。")
+            return
+
+        current = self._settings_provider() or UserSettings(45, 30, [])
+        result = self._prompt_settings(current)
+        if result is None:
+            return
+        try:
+            self._update_settings(result)
+            rumps.notification("提醒设置已更新", "", "新的久坐阈值与静默时段已生效")
+        except Exception:
+            rumps.alert("操作失败", "无法保存设置，请查看日志。")
+
+    def _handle_manual_refresh(self, _sender: rumps.MenuItem) -> None:
+        if self._refresh_callback is None:
+            rumps.alert("未配置刷新", "当前版本未提供手动刷新。")
+            return
+        try:
+            self._refresh_callback()
+            rumps.notification("久坐计时已刷新", "", "重新开始统计在座时长。")
+        except Exception:
+            rumps.alert("操作失败", "无法刷新久坐计时，请查看日志。")
+
+    def _prompt_settings(self, current: UserSettings) -> Optional[UserSettings]:
+        if NSAlert is not None and NSTextField is not None and NSSlider is not None:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("提醒设置")
+            alert.setInformativeText_("配置久坐阈值、提醒冷却与静默时段")
+            alert.addButtonWithTitle_("保存")
+            alert.addButtonWithTitle_("取消")
+
+            width = 280.0
+            height = 220.0
+            container = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, height))
+
+            def make_label(text: str, y: float, alignment: int = 0) -> NSTextField:
+                label = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, y, width, 18.0))
+                label.setStringValue_(text)
+                label.setEditable_(False)
+                label.setBordered_(False)
+                label.setBezeled_(False)
+                label.setDrawsBackground_(False)
+                label.setAlignment_(alignment)
+                return label
+
+            def make_value_label(y: float, value: float) -> NSTextField:
+                value_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, y, width, 22.0))
+                value_label.setStringValue_(f"{value:.0f} 分钟")
+                value_label.setEditable_(False)
+                value_label.setBordered_(False)
+                value_label.setBezeled_(False)
+                value_label.setDrawsBackground_(False)
+                value_label.setAlignment_(1)
+                return value_label
+
+            prolonged_value = max(15.0, min(240.0, float(current.prolonged_seated_minutes)))
+            cooldown_value = max(5.0, min(120.0, float(current.notification_cooldown_minutes)))
+
+            prolonged_label = make_label("久坐阈值 (分钟)：", 192.0)
+            prolonged_value_label = make_value_label(168.0, prolonged_value)
+
+            prolonged_slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0.0, 136.0, width, 24.0))
+            prolonged_slider.setMinValue_(15.0)
+            prolonged_slider.setMaxValue_(240.0)
+            prolonged_slider.setDoubleValue_(prolonged_value)
+            prolonged_slider.setNumberOfTickMarks_(46)
+            prolonged_slider.setAllowsTickMarkValuesOnly_(True)
+            prolonged_slider.setContinuous_(True)
+
+            cooldown_label = make_label("提醒冷却 (分钟)：", 112.0)
+            cooldown_value_label = make_value_label(88.0, cooldown_value)
+
+            cooldown_slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0.0, 56.0, width, 24.0))
+            cooldown_slider.setMinValue_(5.0)
+            cooldown_slider.setMaxValue_(120.0)
+            cooldown_slider.setDoubleValue_(cooldown_value)
+            cooldown_slider.setNumberOfTickMarks_(24)
+            cooldown_slider.setAllowsTickMarkValuesOnly_(True)
+            cooldown_slider.setContinuous_(True)
+
+            quiet_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, 16.0, width, 22.0))
+            quiet_str = ", ".join(f"{start}-{end}" for start, end in current.quiet_hours)
+            quiet_field.setStringValue_(quiet_str)
+            quiet_field.setPlaceholderString_("例如 22:00-07:00, 12:30-13:30")
+            quiet_field.setEditable_(True)
+            quiet_field.setBezeled_(True)
+            quiet_field.setBordered_(True)
+            quiet_field.setDrawsBackground_(True)
+
+            container.addSubview_(prolonged_label)
+            container.addSubview_(prolonged_value_label)
+            container.addSubview_(prolonged_slider)
+            container.addSubview_(cooldown_label)
+            container.addSubview_(cooldown_value_label)
+            container.addSubview_(cooldown_slider)
+            container.addSubview_(make_label("静默时段 (逗号分隔)：", 40.0))
+            container.addSubview_(quiet_field)
+
+            if _FlowSliderDelegate is not None:
+                prolonged_delegate = _FlowSliderDelegate.alloc().initWithLabel_(prolonged_value_label)
+                prolonged_slider.setTarget_(prolonged_delegate)
+                prolonged_slider.setAction_(objc.selector(_FlowSliderDelegate.sliderChanged_, signature=b"v@:@"))
+                prolonged_delegate.sliderChanged_(prolonged_slider)
+                cooldown_delegate = _FlowSliderDelegate.alloc().initWithLabel_(cooldown_value_label)
+                cooldown_slider.setTarget_(cooldown_delegate)
+                cooldown_slider.setAction_(objc.selector(_FlowSliderDelegate.sliderChanged_, signature=b"v@:@"))
+                cooldown_delegate.sliderChanged_(cooldown_slider)
+                try:
+                    objc.setAssociatedObject(
+                        prolonged_slider,
+                        b"_upclock_settings_prolonged_delegate",
+                        prolonged_delegate,
+                        getattr(objc, "OBJC_ASSOCIATION_RETAIN", 0),
+                    )
+                    objc.setAssociatedObject(
+                        cooldown_slider,
+                        b"_upclock_settings_cooldown_delegate",
+                        cooldown_delegate,
+                        getattr(objc, "OBJC_ASSOCIATION_RETAIN", 0),
+                    )
+                except Exception:
+                    pass
+
+            alert.setAccessoryView_(container)
+            window = alert.window()
+            if window is not None:
+                window.setInitialFirstResponder_(quiet_field)
+                window.makeFirstResponder_(quiet_field)
+            response = alert.runModal()
+            if response not in (NSAlertFirstButtonReturn, 1, 1000):
+                return None
+
+            prolonged = int(round(prolonged_slider.doubleValue()))
+            cooldown = int(round(cooldown_slider.doubleValue()))
+
+            quiet_slots = self._parse_quiet_input(quiet_field.stringValue())
+            if quiet_slots is None:
+                rumps.alert(
+                    "静默时段格式错误",
+                    "请使用 HH:MM-HH:MM 形式，多个时段用逗号分隔。",
+                )
+                return None
+
+            return UserSettings(
+                prolonged_seated_minutes=max(15, prolonged),
+                notification_cooldown_minutes=max(5, cooldown),
+                quiet_hours=quiet_slots,
+            )
+
+        window = rumps.Window(
+            message=(
+                "请输入设置，静默时段示例: 22:00-07:00, 12:30-13:30\n"
+                "每行一个字段:久坐阈值,提醒冷却,静默时段"
+            ),
+            title="提醒设置",
+            default_text=(
+                f"{current.prolonged_seated_minutes}\n"
+                f"{current.notification_cooldown_minutes}\n"
+                ", ".join(f"{start}-{end}" for start, end in current.quiet_hours)
+            ),
+            ok="保存",
+            cancel="取消",
+            dimensions=(260, 140),
+        )
+        window.icon = None
+        response = window.run()
+        if response.clicked != 1:
+            return None
+        lines = response.text.splitlines()
+        if not lines:
+            return None
+        try:
+            prolonged = int(lines[0].strip())
+            cooldown = int(lines[1].strip()) if len(lines) > 1 else current.notification_cooldown_minutes
+        except ValueError:
+            rumps.alert("输入无效", "请填写数字形式的分钟数。")
+            return None
+        quiet_line = lines[2].strip() if len(lines) > 2 else ""
+        quiet_slots = self._parse_quiet_input(quiet_line)
+        if quiet_slots is None:
+            rumps.alert(
+                "静默时段格式错误",
+                "请使用 HH:MM-HH:MM 形式，多个时段用逗号分隔。",
+            )
+            return None
+
+        return UserSettings(
+            prolonged_seated_minutes=max(15, prolonged),
+            notification_cooldown_minutes=max(5, cooldown),
+            quiet_hours=quiet_slots,
+        )
+
+    def _parse_quiet_input(self, text: str) -> Optional[list[tuple[str, str]]]:
+        text = text.strip()
+        if not text:
+            return []
+        pairs: list[tuple[str, str]] = []
+        for raw in text.split(","):
+            part = raw.strip()
+            if not part:
+                continue
+            if "-" not in part:
+                return None
+            start, end = part.split("-", 1)
+            start = start.strip()
+            end = end.strip()
+            if not start or not end:
+                return None
+            pairs.append((start, end))
+        return pairs
 
     def _handle_system_sleep(self, *_args, **_kwargs) -> None:
         if self._on_system_sleep is not None:
@@ -467,6 +826,12 @@ def run_status_bar_app(
     flow_state_provider: Optional[Callable[[], tuple[bool, float]]] = None,
     activate_flow_mode: Optional[Callable[[float], None]] = None,
     cancel_flow_mode: Optional[Callable[[], None]] = None,
+    snooze_state_provider: Optional[Callable[[], tuple[bool, float]]] = None,
+    activate_snooze: Optional[Callable[[float], None]] = None,
+    cancel_snooze: Optional[Callable[[], None]] = None,
+    settings_provider: Optional[Callable[[], Optional[UserSettings]]] = None,
+    update_settings: Optional[Callable[[UserSettings], None]] = None,
+    refresh_callback: Optional[Callable[[], None]] = None,
 ) -> None:
     app = StatusBarApp(
         snapshot_provider,
@@ -476,6 +841,12 @@ def run_status_bar_app(
         flow_state_provider=flow_state_provider,
         activate_flow_mode=activate_flow_mode,
         cancel_flow_mode=cancel_flow_mode,
+        snooze_state_provider=snooze_state_provider,
+        activate_snooze=activate_snooze,
+        cancel_snooze=cancel_snooze,
+        settings_provider=settings_provider,
+        update_settings=update_settings,
+        refresh_callback=refresh_callback,
     )
     app.run()
 

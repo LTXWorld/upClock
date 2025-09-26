@@ -50,6 +50,14 @@ body {
   gap: 20px;
 }
 
+.cards--overview {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.cards--daily {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
 .card {
   background: var(--card-bg);
   border: 1px solid var(--border);
@@ -57,6 +65,16 @@ body {
   padding: 20px;
   backdrop-filter: blur(12px);
   box-shadow: 0 20px 35px rgba(10, 12, 21, 0.4);
+}
+
+.card small {
+  display: block;
+  color: var(--text-secondary);
+}
+
+.card--state {
+  background: linear-gradient(135deg, rgba(79, 124, 255, 0.2), rgba(52, 88, 199, 0.1));
+  border: 1px solid rgba(79, 124, 255, 0.3);
 }
 
 .card h2 {
@@ -103,7 +121,7 @@ body {
 }
 
 .chart-panel,
-.details {
+.insights {
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -112,28 +130,17 @@ body {
 }
 
 .chart-panel h3,
-.details h3 {
+.insights h3 {
   margin-top: 0;
   margin-bottom: 16px;
   color: var(--text-secondary);
 }
 
-.details table {
-  width: 100%;
-  border-collapse: collapse;
-}
 
-.details th,
-.details td {
-  padding: 12px 8px;
-  border-bottom: 1px solid var(--border);
-}
-
-.details th {
+.insights p {
+  margin: 0;
   color: var(--text-secondary);
-  text-align: left;
-  font-weight: 400;
-  width: 200px;
+  line-height: 1.6;
 }
 
 @media (max-width: 640px) {

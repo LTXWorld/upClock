@@ -25,6 +25,7 @@ class AppConfig(BaseModel):
     window_categories: list[WindowCategory] = Field(default_factory=list)
     notifications_enabled: bool = True
     notification_cooldown_minutes: int = Field(30, ge=1)
+    quiet_hours: list[list[str]] = Field(default_factory=list)
     vision_enabled: bool = True
     vision_capture_interval_seconds: float = Field(10.0, ge=1.0)
     vision_presence_threshold: float = Field(0.6, ge=0.0, le=1.0)

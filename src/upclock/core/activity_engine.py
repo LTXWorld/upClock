@@ -271,6 +271,11 @@ class ActivityEngine:
     def _now(self) -> dt.datetime:
         return dt.datetime.utcnow()
 
+    def update_config(self, config: AppConfig) -> None:
+        """更新配置参数。"""
+
+        self._config = config
+
     @dataclass
     class _Presence:
         timestamp: dt.datetime

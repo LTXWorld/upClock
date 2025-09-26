@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import random
 import threading
@@ -20,6 +21,7 @@ from upclock.adapters.vision import (
 from upclock.adapters.vision.controller import VisionController
 from upclock.adapters.vision.posture_estimator import PostureEstimationConfig
 from upclock.config import AppConfig
+from upclock.config_store import load_user_settings, save_user_settings, UserSettings
 from upclock.core.activity_engine import ActivityEngine, ActivitySnapshot, ActivityState
 from upclock.core.signal_buffer import SignalBuffer
 from upclock.ui.status import NotificationMessage, StatusSnapshot
@@ -33,6 +35,48 @@ REMINDER_SUGGESTIONS = [
 ]
 
 
+def _parse_quiet_slots(quiet_hours: list[list[str]]) -> list[tuple[int, int]]:
+    slots: list[tuple[int, int]] = []
+    for slot in quiet_hours:
+        if len(slot) != 2:
+            continue
+        start = _time_str_to_minutes(slot[0])
+        end = _time_str_to_minutes(slot[1])
+        if start is None or end is None:
+            continue
+        slots.append((start, end))
+    return slots
+
+
+def _time_str_to_minutes(value: str) -> Optional[int]:
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return None
+    return hour * 60 + minute
+
+
+def _quiet_status(now: dt.datetime, slots: list[tuple[int, int]]) -> tuple[bool, float]:
+    current_minutes = now.hour * 60 + now.minute + now.second / 60.0
+    for start, end in slots:
+        if start == end:
+            continue
+        if start < end:
+            if start <= current_minutes < end:
+                return True, end - current_minutes
+        else:  # overnight
+            if current_minutes >= start or current_minutes < end:
+                remaining = (end + 1440 - current_minutes) if current_minutes >= start else (end - current_minutes)
+                return True, remaining
+    return False, 0.0
+
+
 @dataclass
 class SharedState:
     """共享状态，用于状态栏读取最新快照。"""
@@ -43,7 +87,11 @@ class SharedState:
     system_sleeping: bool = False
     system_state_changed_at: float = 0.0
     flow_mode_until: float = 0.0
+    snooze_until: float = 0.0
+    _current_settings: Optional[UserSettings] = None
+    _settings_update: Optional[UserSettings] = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _manual_reset_requested: bool = field(default=False, init=False, repr=False)
 
     def set(
         self,
@@ -107,11 +155,76 @@ class SharedState:
                 return False, 0.0
             return True, remaining / 60.0
 
+    def activate_snooze(self, duration_minutes: float) -> None:
+        duration_seconds = max(0.0, float(duration_minutes)) * 60.0
+        with self._lock:
+            if duration_seconds <= 0:
+                self.snooze_until = 0.0
+            else:
+                self.snooze_until = time.time() + duration_seconds
+
+    def cancel_snooze(self) -> None:
+        with self._lock:
+            self.snooze_until = 0.0
+
+    def get_snooze_state(self) -> tuple[bool, float]:
+        now = time.time()
+        with self._lock:
+            remaining = max(0.0, self.snooze_until - now)
+            if remaining <= 0.0:
+                self.snooze_until = 0.0
+                return False, 0.0
+            return True, remaining / 60.0
+
+    def set_current_settings(self, settings: UserSettings) -> None:
+        with self._lock:
+            self._current_settings = settings
+
+    def get_current_settings(self) -> Optional[UserSettings]:
+        with self._lock:
+            return self._current_settings
+
+    def queue_settings_update(self, settings: UserSettings) -> None:
+        with self._lock:
+            self._settings_update = settings
+
+    def pop_settings_update(self) -> Optional[UserSettings]:
+        with self._lock:
+            settings = self._settings_update
+            self._settings_update = None
+            return settings
+
+    def request_manual_reset(self) -> None:
+        """请求手动重置计时。"""
+
+        with self._lock:
+            self._manual_reset_requested = True
+
+    def consume_manual_reset(self) -> bool:
+        with self._lock:
+            requested = self._manual_reset_requested
+            self._manual_reset_requested = False
+            return requested
+
 
 async def run_backend(shared: SharedState) -> None:
     """运行异步后台服务，周期性刷新共享状态。"""
 
     config = AppConfig.load()
+    user_settings = load_user_settings()
+    if user_settings is not None:
+        config = config.model_copy(
+            update={
+                "prolonged_seated_minutes": user_settings.prolonged_seated_minutes,
+                "notification_cooldown_minutes": user_settings.notification_cooldown_minutes,
+                "quiet_hours": [list(slot) for slot in user_settings.quiet_hours],
+            }
+        )
+    else:
+        user_settings = UserSettings.from_config(config)
+
+    shared.set_current_settings(user_settings)
+    quiet_slots = _parse_quiet_slots(config.quiet_hours)
     buffer = SignalBuffer()
     engine = ActivityEngine(buffer, config=config)
 
@@ -172,11 +285,58 @@ async def run_backend(shared: SharedState) -> None:
     last_suggestion: Optional[str] = None
     cooldown_seconds = config.notification_cooldown_minutes * 60
     was_sleeping = shared.is_system_sleeping()
+    prev_state: Optional[ActivityState] = None
+    last_tick = time.time()
+    daily_date = dt.date.today()
+    daily_prolonged_seconds = 0.0
+    daily_break_count = 0
+    daily_longest_seated_seconds = 0.0
 
     try:
         while True:
+            loop_now = time.time()
+            delta = max(0.0, loop_now - last_tick)
+            last_tick = loop_now
+
+            today = dt.date.today()
+            if today != daily_date:
+                daily_date = today
+                daily_prolonged_seconds = 0.0
+                daily_break_count = 0
+                daily_longest_seated_seconds = 0.0
+
+            pending_settings = shared.pop_settings_update()
+            if pending_settings is not None:
+                try:
+                    save_user_settings(pending_settings)
+                except Exception:
+                    logging.getLogger(__name__).warning("无法写入用户设置", exc_info=True)
+                config = config.model_copy(
+                    update={
+                        "prolonged_seated_minutes": pending_settings.prolonged_seated_minutes,
+                        "notification_cooldown_minutes": pending_settings.notification_cooldown_minutes,
+                        "quiet_hours": [list(slot) for slot in pending_settings.quiet_hours],
+                    }
+                )
+                engine.update_config(config)
+                cooldown_seconds = config.notification_cooldown_minutes * 60
+                quiet_slots = _parse_quiet_slots(config.quiet_hours)
+                user_settings = pending_settings
+                shared.set_current_settings(user_settings)
+
+            if shared.consume_manual_reset():
+                logging.getLogger(__name__).info("手动刷新久坐计时")
+                engine.reset_state()
+                if buffer is not None:
+                    buffer.clear()
+                last_notification_at = None
+                prev_state = ActivityState.SHORT_BREAK
+
+            quiet_active, quiet_remaining = _quiet_status(dt.datetime.now(), quiet_slots)
+
             sleeping = shared.is_system_sleeping()
             flow_active, flow_remaining = shared.get_flow_mode_state()
+            snooze_active, snooze_remaining = shared.get_snooze_state()
 
             if sleeping:
                 if not was_sleeping:
@@ -199,6 +359,14 @@ async def run_backend(shared: SharedState) -> None:
                         "system_state": "sleeping",
                         "flow_mode_active": 1.0 if flow_active else 0.0,
                         "flow_mode_remaining": float(flow_remaining if flow_active else 0.0),
+                        "snooze_active": 1.0 if snooze_active else 0.0,
+                        "snooze_remaining": float(snooze_remaining if snooze_active else 0.0),
+                        "quiet_active": 1.0 if quiet_active else 0.0,
+                        "quiet_remaining": float(quiet_remaining if quiet_active else 0.0),
+                        "daily_date": daily_date.isoformat(),
+                        "daily_prolonged_minutes": round(daily_prolonged_seconds / 60, 2),
+                        "daily_break_count": int(daily_break_count),
+                        "daily_longest_seated_minutes": round(daily_longest_seated_seconds / 60, 2),
                     },
                     flow_mode_remaining=flow_remaining if flow_active else None,
                 )
@@ -213,12 +381,15 @@ async def run_backend(shared: SharedState) -> None:
                         updated_at=now,
                         next_reminder_minutes=None,
                         flow_mode_minutes=flow_remaining if flow_active else None,
+                        snooze_minutes=snooze_remaining if snooze_active else None,
+                        quiet_minutes=quiet_remaining if quiet_active else None,
                     ),
                     notification=None,
                 )
 
                 last_notification_at = None
                 was_sleeping = True
+                prev_state = ActivityState.SHORT_BREAK
                 await asyncio.sleep(2.0)
                 continue
 
@@ -232,6 +403,8 @@ async def run_backend(shared: SharedState) -> None:
             snapshot.flow_mode_remaining = flow_remaining if flow_active else None
             snapshot.metrics["flow_mode_active"] = 1.0 if flow_active else 0.0
             snapshot.metrics["flow_mode_remaining"] = float(flow_remaining if flow_active else 0.0)
+            snapshot.metrics["snooze_active"] = 1.0 if snooze_active else 0.0
+            snapshot.metrics["snooze_remaining"] = float(snooze_remaining if snooze_active else 0.0)
 
             probe_pending = float(snapshot.metrics.get("visual_probe_pending", 0.0) or 0.0) >= 0.5
             if probe_pending and vision_adapter is not None:
@@ -243,10 +416,38 @@ async def run_backend(shared: SharedState) -> None:
             seated_minutes = snapshot.metrics.get("seated_minutes", 0.0)
             break_minutes = snapshot.metrics.get("break_minutes", 0.0)
 
+            if snapshot.state is ActivityState.PROLONGED_SEATED:
+                daily_prolonged_seconds += delta
+
+            current_seated_seconds = float(seated_minutes or 0.0) * 60.0
+            if current_seated_seconds > daily_longest_seated_seconds:
+                daily_longest_seated_seconds = current_seated_seconds
+
+            if (
+                snapshot.state is ActivityState.SHORT_BREAK
+                and prev_state not in (ActivityState.SHORT_BREAK, None)
+            ):
+                daily_break_count += 1
+
+            snapshot.metrics["daily_date"] = daily_date.isoformat()
+            snapshot.metrics["daily_prolonged_minutes"] = round(daily_prolonged_seconds / 60, 2)
+            snapshot.metrics["daily_break_count"] = int(daily_break_count)
+            snapshot.metrics["daily_longest_seated_minutes"] = round(
+                daily_longest_seated_seconds / 60, 2
+            )
+            snapshot.metrics["quiet_active"] = 1.0 if quiet_active else 0.0
+            snapshot.metrics["quiet_remaining"] = float(quiet_remaining if quiet_active else 0.0)
+
+            if snooze_active and snapshot.state is not ActivityState.PROLONGED_SEATED:
+                shared.cancel_snooze()
+                snooze_active, snooze_remaining = False, 0.0
+                snapshot.metrics["snooze_active"] = 0.0
+                snapshot.metrics["snooze_remaining"] = 0.0
+
             next_reminder_minutes: Optional[float] = None
             notification: Optional[NotificationMessage] = None
 
-            if config.notifications_enabled and not flow_active:
+            if config.notifications_enabled and not flow_active and not snooze_active and not quiet_active:
                 if snapshot.state is ActivityState.PROLONGED_SEATED:
                     should_notify = False
                     if last_notification_at is None:
@@ -270,6 +471,10 @@ async def run_backend(shared: SharedState) -> None:
                         next_reminder_minutes = config.notification_cooldown_minutes
                 else:
                     last_notification_at = None
+            elif snooze_active and snapshot.state is ActivityState.PROLONGED_SEATED:
+                next_reminder_minutes = snooze_remaining
+            elif quiet_active and snapshot.state is ActivityState.PROLONGED_SEATED:
+                next_reminder_minutes = quiet_remaining
 
             shared.set(
                 activity=snapshot,
@@ -281,9 +486,13 @@ async def run_backend(shared: SharedState) -> None:
                     updated_at=now,
                     next_reminder_minutes=next_reminder_minutes,
                     flow_mode_minutes=flow_remaining if flow_active else None,
+                    snooze_minutes=snooze_remaining if snooze_active else None,
+                    quiet_minutes=quiet_remaining if quiet_active else None,
                 ),
                 notification=notification,
             )
+
+            prev_state = snapshot.state
 
             if vision_controller is not None:
                 presence_conf = float(snapshot.metrics.get("presence_confidence", 0.0) or 0.0)
