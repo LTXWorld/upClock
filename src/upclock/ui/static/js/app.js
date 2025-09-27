@@ -26,7 +26,7 @@ const chart = ChartLib && ctx
         labels: [],
         datasets: [
           {
-            label: "活跃得分",
+            label: "专注指数",
             data: [],
             borderColor: "#4f7cff",
             backgroundColor: "rgba(79, 124, 255, 0.1)",
@@ -49,9 +49,9 @@ const chart = ChartLib && ctx
         scales: {
           y: {
             suggestedMin: 0,
-            suggestedMax: 1,
+            suggestedMax: 100,
             ticks: {
-              callback: (value) => Number(value).toFixed(1),
+              callback: (value) => `${Math.round(Number(value))}%`,
             },
           },
           y1: {
@@ -111,7 +111,9 @@ function updateView(data) {
   stateEl.textContent = STATE_LABELS[state] ?? state ?? "UNKNOWN";
   applyStateClass(state);
 
-  scoreEl.textContent = Number(score).toFixed(3);
+  const rawScore = Number(score ?? 0);
+  const scorePercent = Math.max(0, Math.min(100, rawScore * 100));
+  scoreEl.textContent = `${scorePercent.toFixed(0)}%`;
 
   const seatedMinutes = metrics?.seated_minutes ?? 0;
   const breakMinutes = metrics?.break_minutes ?? 0;
@@ -139,13 +141,16 @@ function updateView(data) {
     dailyLongestEl.textContent = `${dailyLongest.toFixed(1)} min`;
   }
   if (dailyDateEl) {
-    dailyDateEl.textContent = dailyDate ? `统计日期：${dailyDate}` : "统计日期：--";
+    const suffix = " · 仅统计进入久坐状态后的时长";
+    dailyDateEl.textContent = dailyDate
+      ? `统计日期：${dailyDate}${suffix}`
+      : `统计日期：--${suffix}`;
   }
 
   const summaryPieces = [
-    `今日累计久坐 ${dailyProlonged.toFixed(1)} 分钟`,
+    `今日久坐状态累计 ${dailyProlonged.toFixed(1)} 分钟`,
     `已起身休息 ${dailyBreakCount.toFixed(0)} 次`,
-    `最长连续久坐 ${dailyLongest.toFixed(1)} 分钟`,
+    `最长连续在座 ${dailyLongest.toFixed(1)} 分钟`,
   ];
   if (flowActive) {
     summaryPieces.push("当前处于心流模式，提醒已静默");
@@ -160,7 +165,7 @@ function updateView(data) {
     dailySummaryEl.textContent = summaryPieces.join("，") + "。";
   }
 
-  appendHistory(now, Number(score || 0), Number(seatedMinutes));
+  appendHistory(now, rawScore, Number(seatedMinutes));
 }
 
 function appendHistory(timestamp, score, seatedMinutes) {
@@ -172,7 +177,8 @@ function appendHistory(timestamp, score, seatedMinutes) {
   const idleData = chart.data.datasets[1].data;
 
   labels.push(label);
-  scoreData.push(score);
+  const percentScore = Math.max(0, Math.min(100, Number(score) * 100));
+  scoreData.push(percentScore);
   idleData.push(seatedMinutes);
 
   if (labels.length > HISTORY_LIMIT) {

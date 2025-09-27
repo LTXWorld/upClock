@@ -1,157 +1,203 @@
 # upClock
 
-桌面久坐提醒助手，目标是在后台持续运行，根据键鼠活动与活跃窗口判断用户状态，并在达到阈值时提醒。
+upClock 是一款面向 macOS 的轻量久坐提醒工具，常驻状态栏运行：
+
+- 以键鼠活跃度、前台窗口类别、摄像头在座信号（可选）实时评估用户状态。
+- 当连续坐姿接近阈值时，通过系统通知与状态栏图标提示，提供多样化的休息建议。
+- 提供仪表盘可视化、手动刷新、延后提醒、心流模式、静默时段等操控能力，让用户掌控提醒节奏。
+
+> **数据策略**：除个人化设置（久坐阈值/静默时段等）写入 `~/.upclock/config.json` 外，其余活动数据均保存在内存中。关闭应用后会重新开始统计，便于保持私密与轻量。如果后续需要周报/历史趋势，再考虑增持久化方案。
+
+---
 
 ## 目录结构
 
-- `src/upclock/`：核心代码（信号缓冲、评分引擎、适配器、通知、UI）。
-- `scripts/`：开发/运维脚本，当前包含 `dev_server.py` 用于启动 FastAPI。
-- `tests/`：pytest 测试用例。
-- `AGENT.md`：整体技术方案与迭代规划。
+- `src/upclock/`：核心逻辑（信号采集缓冲、活动评分引擎、视觉适配器、状态栏 UI、FastAPI 仪表盘）。
+- `scripts/`：开发与打包脚本（`dev_server.py` 启动 API，`build_macos_app*.sh` 打包 macOS App）。
+- `tests/`：pytest 测试。
+- `config.local.py`：示例本地配置，可覆盖默认参数。
+- `AGENT.md`：全局技术方案与迭代规划。
 
-## 开始使用
+## 功能亮点
+
+- **状态栏常驻**：图标用 `👨🏻‍💻`/`☕`/`💥` 表示活跃、短暂休息、久坐超阈值。点击可查看专注指数、在座/休息时长，并访问仪表盘/退出。新增“刷新久坐计时”按钮，可手动清零当前在座时间。
+- **专注指数 (0~100%)**：综合键鼠输入、久坐衰减与坐姿评分。越高代表越专注、越不需要提醒。
+- **多种提醒控制**：
+  - 延后提醒：快速延后 5/15/30 分钟，菜单实时显示剩余时间，可一键取消。
+  - 心流模式：滚轮设定 15~240 分钟，在专注期间静默所有提醒。
+  - 静默时段：可配置多个时间段（如午休/夜间）自动免打扰。
+  - 智能通知：达到阈值时，系统级通知（带声音）+ 状态栏弹跳 + 随机化休息建议。
+- **仪表盘可视化**：
+  - 实时显示当前状态、专注指数、连续在座/休息时长、最近 5 分钟趋势。
+  - 今日统计：久坐状态累计时长、已起身休息次数、最长连续在座时间（含久坐前活跃阶段）。
+  - 提示区域同步展示心流/延后/静默状态，帮助快速判断下一次提醒时间。
+- **视觉信号（可选）**：
+  - 自适应电源策略，键鼠静默 >60 秒或久坐阈值达 95% 时才短暂启用摄像头 3 秒确认是否有人在座。
+  - 支持 MediaPipe + MoveNet ONNX 姿态模型，结合坐姿评分（upright/slouch/uncertain/untracked）。
+  - 若摄像头不可用自动降级至差分模拟，保障核心功能可用。
+- **状态联动**：
+  - 系统休眠时自动重置计时并暂停提醒，唤醒后恢复。
+  - 鼠标/键盘重新活跃会取消延后提醒。
+
+---
+
+## 快速开始
 
 1. **安装依赖**
    ```bash
    uv sync --dev
    ```
-   若首次使用 uv，请确保已安装并允许其管理 Python 3.11。
-   若要体验摄像头检测与姿态评估，请额外安装 vision 依赖（包含 OpenCV、MediaPipe、ONNXRuntime）：
-   ```bash
-   uv sync --extra vision
-   ```
+   - `uv` 会为项目创建 `.venv`（Python 3.11）。
+   - 若要启用摄像头/姿态分析，请额外安装视觉依赖：
+     ```bash
+     uv sync --extra vision
+     ```
 
-2. **运行开发服务器**
+2. **运行**
    ```bash
    uv run python main.py
    ```
-   - 系统状态栏会出现 upClock 图标（✅/☕/⛔），展示当前久坐状态。
-   - 服务默认监听 `http://127.0.0.1:8000`，可访问 `/health` 与 `/metrics`。
-   - 浏览器访问 `http://127.0.0.1:8000/` 可查看实时仪表盘（默认每 2 秒刷新一次）。
-   - 首次运行若提示缺少通知或摄像头权限，请在“系统设置”中为终端或 uv 允许运行通知、摄像头与屏幕录制，并在“辅助功能”中授权键鼠监听。
+   - 状态栏出现 upClock 图标；首次运行需授予键鼠监听（辅助功能）、摄像头（若开启视觉）、通知权限。
+   - FastAPI 默认监听 `http://127.0.0.1:8000`；访问 `/` 即可查看实时仪表盘。
 
 3. **运行测试**
    ```bash
    uv run pytest
    ```
 
-## 启用摄像头姿态检测
+4. **自定义设置**
+   - 状态栏“提醒设置…”面板支持滑杆调整久坐阈值、提醒冷却时间，以及逗号分隔的静默时段（如 `22:00-07:00, 12:30-13:30`）。
+   - 保存后会写入 `~/.upclock/config.json`，下次启动自动生效。
 
-1. 安装 vision 依赖并确认终端拥有摄像头权限：
+---
+
+## 摄像头姿态检测（可选）
+
+1. 安装视觉依赖并确认终端拥有摄像头权限：
    ```bash
    uv sync --extra vision
    ```
-   若首次运行，macOS 会弹窗提示摄像头访问，需要在“系统设置 → 隐私与安全”中为终端授权。
+   首次访问摄像头时，macOS 会弹窗提示，需要在“系统设置 → 隐私与安全”授权。
 
-2. 覆盖默认配置（可参考 `config.local.py`）：
+2. 在 `config.local.py` 或自定义配置中启用：
    ```python
    AppConfig(
        vision_enabled=True,
        vision_capture_interval_seconds=8.0,
-       vision_pose_backend="auto",  # 可切换为 "onnx"
+       vision_pose_backend="auto",          # 也可指定 "onnx"
        vision_posture_upright_threshold=0.75,
        vision_posture_slouch_threshold=0.35,
    )
    ```
 
-3. 在 `main.py` 启动前加载自定义配置或在后续版本提供的配置加载入口中启用。
+3. 运行时，upClock 会：
+   - 在键鼠静默 >60 秒或久坐即将超时（95%）时短暂唤醒摄像头 3 秒确认是否仍有人在座。
+   - 若检测到离席会立即重置在座时间并取消通知；若确认有人，则继续累积直到触发提醒。
+   - 无法访问摄像头时，自动回退到差分模拟数据，不影响整体流程。
 
-当摄像头/模型不可用时，系统会自动回退到差分法模拟数据，确保流程不中断。
+### ONNX 姿态模型
 
-> **省电策略**：摄像头不会持续开启，仅在键鼠输入超过约 60 秒仍未恢复、处于“模糊状态”时临时探测约 3 秒，确认是否仍有人在座。探测完成后摄像头立即关闭，从而避免长时间占用硬件资源。
+如需脱离 MediaPipe，可使用 MoveNet ONNX：
 
-> **久坐阈值最终确认**：当连续在座时长达到久坐阈值的约 95% 时（默认 45 分钟 → 约 42 分钟），系统会再触发一次短暂摄像头探测，以判断用户是否仍在座位。若探测结果显示有人，就继续累积并在真正达到阈值时提醒；若判定已离席，则自动重置在座计时，避免误报。
+```python
+AppConfig(
+    vision_enabled=True,
+    vision_pose_backend="onnx",
+    vision_onnx_model_path="/absolute/path/to/movenet.onnx",
+    vision_onnx_model_type="movenet-singlepose",
+)
+```
 
-### 使用 ONNX 模型
+默认支持 MoveNet SinglePose Lightning/Thunder (`(1, 1, 17, 3)`)，其他模型可在 `posture_onnx.py` 中扩展解析逻辑。
 
-若你希望脱离 MediaPipe，使用自定义的 ONNX 姿态模型（目前内置支持 MoveNet SinglePose Lightning/Thunder）：
+---
 
-1. 下载对应的 ONNX 模型文件，例如 `movenet_singlepose_lightning_192x192.onnx`，并放置在本地路径。
-2. 在配置中指定：
-   ```python
-   AppConfig(
-       vision_enabled=True,
-       vision_pose_backend="onnx",
-       vision_onnx_model_path="/absolute/path/to/movenet.onnx",
-       vision_onnx_model_type="movenet-singlepose",
-   )
-   ```
-3. 再次运行 `uv run python main.py`。若模型加载失败，日志会提示并自动退回模拟数据。
+## 仪表盘指标说明
 
-当前实现默认针对 MoveNet 输出格式（`(1, 1, 17, 3)` 的关键点数组）。如需接入其他 ONNX 姿态模型，可在 `posture_onnx.py` 中补充规格描述与解析逻辑。
+- `专注指数`：`score` 原始值 ×100 后映射为 0~100%。受键鼠活跃度、久坐衰减、坐姿评分影响，越高越专注。
+- `连续在座 / 休息`：当前已连续坐了多久 / 最近一次离席持续时间。
+- `今日久坐状态累计`：只统计进入久坐状态后的分钟数（避免与普通在座混淆）。
+- `今日休息次数`：从久坐状态切换到短暂休息的次数。
+- `最长连续在座`：今日单段最长在座时间（含久坐前活跃阶段）。
+- 趋势图：左轴为专注指数（%），右轴为连续在座（分钟），默认记录最近 5 分钟。
 
-## 指标说明（当前 FastAPI `/metrics`）
+仪表盘顶部摘要会动态拼接：久坐累计、休息次数、最长在座，以及心流模式/延后提醒/静默时段的剩余时间。
 
-- `activity_sum`：近 5 分钟内聚合的键鼠事件数（用于观察交互频率）。
-- `normalized_activity`：归一化后的键鼠活跃度（0~1）。
-- `seated_minutes`：自上次有效离席以来的连续在座时长（分钟）。
-- `break_minutes`：距离最近一次检测到活动的分钟数，超过 `break_reset_minutes` 认为已经起身休息。
-- `presence_confidence`：视觉模型输出的在座置信度（0~1）。
-- `posture_score`：根据 MediaPipe/ONNX 姿态模型计算的坐姿得分，越低越可能久坐不良。
-- `posture_state`：对坐姿的离散分类（`upright`、`slouch`、`uncertain`、`untracked`）。
-- `score`：综合分数（活跃度 × 久坐程度衰减 × 姿态修正），越低表示越需要提醒。
-- `state`：`ACTIVE`（正常在座）、`SHORT_BREAK`（近期离席/休息）、`PROLONGED_SEATED`（久坐超阈值）。
+---
 
-## UI / 状态栏预览
+## FastAPI `/metrics` 字段
 
-- 状态栏图标：`👨🏻‍💻` 表示活跃、`☕` 表示短暂休息、`💥` 表示久坐超阈值。点击图标可查看得分、在座/休息时长、打开仪表盘或退出程序。
-- 默认启用久坐提醒：当进入 `PROLONGED_SEATED` 且满足冷却时间（默认 30 分钟，可在配置中修改）时，会通过系统通知提示活动（首次运行若提示缺少 Info.plist，应用会自动生成所需文件）。状态栏菜单会显示下一次提醒的预计时间。
-- 心流模式：状态栏新增“开启心流模式…”菜单，可通过滑杆选择静默时长（15~240 分钟，15 分钟步进）。开启后所有久坐提醒会静默，直到计时结束或手动关闭，适用于编程/写作等专注场景。
-- 延后提醒：状态栏“延后提醒”菜单提供 5/15/30 分钟快速延后选项，并实时显示剩余时间；中途可随时取消，方便在会议或临时事务发生时保持掌控感。
-- 仪表盘：展示实时状态、趋势曲线，并新增“今日久坐总时长”“休息次数”“最长连续久坐”等日累计指标，帮助快速判断当天的久坐风险。指标刷新频率默认 2 秒，可在 `src/upclock/ui/static/js/app.js` 中调整。
-- 提醒设置：状态栏“提醒设置…”可自定义久坐阈值、提醒冷却时间以及多个静默时段。设置会写入 `~/.upclock/config.json`，下次启动自动生效。
-## 配置字段概要
+| 字段 | 说明 |
+| --- | --- |
+| `activity_sum` | 近 5 分钟键鼠事件总量 |
+| `normalized_activity` | 归一化键鼠活跃度（0~1） |
+| `seated_minutes` | 连续在座分钟数 |
+| `break_minutes` | 距离上次输入的分钟数（>= `break_reset_minutes` 视为离席） |
+| `presence_confidence` | 摄像头在座置信度（0~1） |
+| `posture_score` | 姿态得分（越低代表姿态越差） |
+| `posture_state` | 姿态分类：`upright` / `slouch` / `uncertain` / `untracked` |
+| `score` | 专注指数原始值（0~1） |
+| `state` | 活动状态：`ACTIVE` / `SHORT_BREAK` / `PROLONGED_SEATED` |
+| `daily_*` | 今日统计（久坐状态累计、休息次数、最长连续在座） |
+| `flow_mode_*`, `snooze_*`, `quiet_*` | 心流、延后、静默的开关与剩余时间 |
 
-- `short_break_minutes`：判定为“短暂休息”的最小离席时长（默认 3 分钟）。超过该值会重置在座计时。
-- `break_reset_minutes`：在座计时的重置阈值（默认 3 分钟，通常与 `short_break_minutes` 相同）。
-- `prolonged_seated_minutes`：连续在座超过该值视为“久坐”（默认 45 分钟）。
-- `notification_cooldown_minutes`：久坐提醒之间的冷却时间（默认 30 分钟）。
-- `vision_enabled`：是否启用摄像头在位检测（默认关闭）。
-- `vision_capture_interval_seconds`：摄像头采样间隔（默认 10 秒）。
-- `vision_presence_threshold`：判定“在座”所需的最小置信度（默认 0.6，可与姿态模型联动）。
-- `vision_pose_backend`：姿态模型后端（`auto`=优先 MediaPipe，失败降级；`onnx`=使用自定义 ONNXRuntime 模型）。
-- `vision_pose_min_confidence`：姿态关键点最低可接受置信度，低于该值会视为 `untracked`。
-- `vision_posture_upright_threshold` / `vision_posture_slouch_threshold`：坐姿评分分段阈值。
-- `vision_posture_depth_tolerance` / `vision_posture_tilt_tolerance`：前倾与歪斜的容忍度，数值越小越敏感。
-- `vision_onnx_model_path`：可选的 ONNX 模型路径，用于自定义姿态推理。
-- `vision_onnx_model_type`：ONNX 模型规格（默认 MoveNet，可在 `posture_onnx.py` 中查看可选项）。
-- `notifications_enabled`：是否启用系统通知。
+---
 
-若需快速验证久坐提醒，可临时将上述分钟数调小（例如 1 分钟）再运行。启用视觉后，请确认终端已获得摄像头权限；若 MediaPipe 模型不可用，系统会自动退回帧差模拟，相关阈值依旧有效。
+## 配置字段摘要（`AppConfig`）
 
-## 打包发布（macOS）
+- `short_break_minutes` / `break_reset_minutes`
+- `prolonged_seated_minutes`
+- `notification_cooldown_minutes`
+- `notifications_enabled`
+- `vision_*`（详见上文）
+- `window_categories`：可为不同窗口类型（如娱乐/工作）设权重。
 
-使用 `py2app` 可以将 upClock 打包为原生的 `.app`，便于分享给其他 macOS 用户：
+可在 `config.local.py` 中编辑并在 `main.py` 中加载自定义配置，或直接使用状态栏“提醒设置…”修改关键参数。
 
-### 全量版（包含视觉模块）
+---
 
-1. 同步依赖并构建（脚本会使用独立虚拟环境 `.venv-full`，不影响开发环境）：
-   ```bash
-   uv sync --extra macos --extra vision
-   bash scripts/build_macos_app.sh
-   ```
-   - 产物：`dist/upClock.app`，包含摄像头姿态检测所需的 OpenCV/MediaPipe/ONNXRuntime。
+## macOS 打包发布
 
-### 轻量版（仅键鼠 + 状态栏 + 仪表盘）
+项目提供两种打包脚本，方便对外分享：
 
-1. 同步依赖并构建（脚本会使用独立虚拟环境 `.venv-light`）：
-   ```bash
-   uv sync --extra macos
-   bash scripts/build_macos_app_light.sh
-   ```
-   - 产物同样位于 `dist/upClock.app`，但不包含视觉依赖，体积大幅缩减。
-   - 轻量版打包时 `CFBundleName` 会显示为 “upClock Light”，避免与完整版混淆。
+### 完整版（含视觉模块）
+
+```bash
+uv sync --extra macos --extra vision
+bash scripts/build_macos_app.sh
+```
+
+- 输出：`dist/upClock.app`
+- 包含 OpenCV、MediaPipe、ONNXRuntime 等视觉依赖
+- 首次运行需手动授权摄像头/辅助功能/通知
+
+### 轻量版（无视觉依赖）
+
+```bash
+uv sync --extra macos
+bash scripts/build_macos_app_light.sh
+```
+
+- 输出：默认仍为 `dist/upClock.app`。若希望同时保留完整版，可手动重命名为 `upClock-light.app`。
+- 仅保留键鼠监控、状态栏、仪表盘逻辑，体积显著减小。
 
 ### 发布建议
 
-1. 双击运行生成的 `.app`，确认状态栏图标/仪表盘/通知都正常工作。
-2. 若计划对外分发，可将 `.app` 打包为 ZIP，或使用 `hdiutil create` 生成 DMG。
-3. 公共发布时请考虑使用开发者证书进行 `codesign` 与 Apple notarization，以减少 Gatekeeper 提示。
+1. 双击运行产物确认通知/状态栏/仪表盘工作正常。
+2. 对外分发前可 `zip` 或打包为 DMG（`hdiutil create`）。
+3. 若要面向广大用户发布，建议使用开发者证书进行 `codesign` 与 Apple notarization。
 
-> **提示**：完整版与轻量版共用同一份代码，仅在打包脚本中通过环境变量控制是否包含视觉模块。运行轻量版时，缺少视觉依赖会让摄像头功能自动禁用，其余体验保持一致。
-> 两个脚本分别使用 `.venv-full` 与 `.venv-light` 作为独立虚拟环境，可直接删除这些目录以重新构建，不会影响日常开发所用的 `.venv`。
-   - 双击运行 `dist/upClock.app`，确认状态栏图标/仪表盘/通知都正常工作。
-   - 若计划对外分发，可将 `dist/upClock.app` 打包为 ZIP，或使用 `hdiutil create` 生成 DMG。
-   - 公共发布时请考虑使用开发者证书进行 `codesign` 与 Apple notarization，以减少 Gatekeeper 提示。
+---
 
-> **提示**：若希望生成不含视觉模块的轻量版，可在脚本中去掉 `--extra vision` 并调整 `setup.py` 的 `includes`/`packages`。不过在运行端若缺失相关依赖，摄像头功能会自动禁用。
+## 常见问题
+
+- **通知瞬间闪烁或不出现**：确保系统设置中允许 upClock 横幅/提醒与声音。新版默认使用 `NSUserNotificationCenter` 推送，可持续显示。
+- **摄像头未触发**：需在键鼠静默或久坐临界时才会短暂启动；可在日志中查看 `Vision` 相关提示。若终端无权限会自动回退模拟数据。
+- **键鼠活动统计异常**：确认“系统设置 → 隐私与安全 → 辅助功能”中已勾选终端/`python`。
+- **轻量版缺少视觉能力**：设计如此；需使用完整版或在本地安装 `--extra vision` 依赖并运行源码。
+
+---
+
+## 版权与贡献
+
+upClock 目前仍在积极迭代中，欢迎通过 Issue / PR 反馈体验、提出改进建议或贡献代码。请参考 `AGENT.md` 了解整体规划与下一步方向。

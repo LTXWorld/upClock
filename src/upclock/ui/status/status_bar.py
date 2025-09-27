@@ -211,7 +211,7 @@ class StatusBarApp(rumps.App):
         self._refresh_item = rumps.MenuItem("刷新久坐计时", self._handle_manual_refresh)
         self.menu = [
             rumps.MenuItem(title="当前状态", callback=None),
-            rumps.MenuItem(title="活跃得分", callback=None),
+            rumps.MenuItem(title="专注指数", callback=None),
             rumps.MenuItem(title="在座/休息", callback=None),
             rumps.MenuItem(title="下一次提醒", callback=None),
             self._refresh_item,
@@ -241,7 +241,8 @@ class StatusBarApp(rumps.App):
         self.title = self._title_for_state(snapshot.state)
         state_name = self._state_label(snapshot.state)
         self.menu["当前状态"].title = f"状态：{state_name}"
-        self.menu["活跃得分"].title = f"活跃得分：{snapshot.score:.2f}"
+        focus_percent = max(0.0, min(100.0, snapshot.score * 100.0))
+        self.menu["专注指数"].title = f"专注指数：{focus_percent:.0f}%"
         self.menu["在座/休息"].title = f"在座：{snapshot.seated_minutes:.1f} 分钟 / 休息：{snapshot.break_minutes:.1f}"
         if "下一次提醒" in self.menu:
             if snapshot.quiet_minutes is not None:
