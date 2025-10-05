@@ -15,68 +15,6 @@ const timeFormatter = new Intl.DateTimeFormat("zh-CN", {
   second: "2-digit",
 });
 
-const ctx = document.getElementById("trend-chart");
-const HISTORY_LIMIT = 150;
-
-const ChartLib = window.Chart || null;
-const chart = ChartLib && ctx
-  ? new ChartLib(ctx, {
-      type: "line",
-      data: {
-        labels: [],
-        datasets: [
-          {
-            label: "专注指数",
-            data: [],
-            borderColor: "#4f7cff",
-            backgroundColor: "rgba(79, 124, 255, 0.1)",
-            tension: 0.35,
-            fill: true,
-          },
-          {
-            label: "连续在座 (分钟)",
-            data: [],
-            borderColor: "#f7b851",
-            backgroundColor: "rgba(247, 184, 81, 0.08)",
-            tension: 0.35,
-            yAxisID: "y1",
-          },
-        ],
-      },
-      options: {
-        animation: false,
-        responsive: true,
-        scales: {
-          y: {
-            suggestedMin: 0,
-            suggestedMax: 100,
-            ticks: {
-              callback: (value) => `${Math.round(Number(value))}%`,
-            },
-          },
-          y1: {
-            position: "right",
-            suggestedMin: 0,
-            grid: {
-              drawOnChartArea: false,
-            },
-          },
-        },
-        plugins: {
-          legend: {
-            labels: {
-              color: "#cfd2dc",
-            },
-          },
-        },
-      },
-    })
-  : null;
-
-if (!ChartLib) {
-  console.warn("Chart.js 未加载，将仅显示基础卡片");
-}
-
 const STATE_LABELS = {
   ACTIVE: "活跃",
   SHORT_BREAK: "短暂休息",
@@ -130,6 +68,10 @@ function updateView(data) {
   const snoozeRemaining = Number(metrics?.snooze_remaining ?? 0);
   const quietActive = Number(metrics?.quiet_active ?? 0) >= 0.5;
   const quietRemaining = Number(metrics?.quiet_remaining ?? 0);
+  const contextMode = metrics?.context_mode ?? "normal";
+  const contextMessage = metrics?.context_message ?? "";
+  const contextRemaining = Number(metrics?.context_remaining_minutes ?? 0);
+  const contextSuppressed = Number(metrics?.context_suppressed_notifications ?? 0);
 
   if (dailyProlongedEl) {
     dailyProlongedEl.textContent = `${dailyProlonged.toFixed(1)} min`;
@@ -161,33 +103,22 @@ function updateView(data) {
   if (quietActive) {
     summaryPieces.push(`处于静默时段，剩余 ${quietRemaining.toFixed(1)} 分钟`);
   }
+  if (contextMode === "meeting") {
+    summaryPieces.push(contextMessage || "会议模式，提醒已静音");
+  } else if (contextMode === "presentation") {
+    summaryPieces.push(contextMessage || "演示模式，提醒暂缓");
+  } else if (contextMode === "post_meeting_pending") {
+    const remain = Math.max(0, contextRemaining);
+    const delayed = contextSuppressed > 0 ? `（已积累 ${contextSuppressed.toFixed(0)} 条提醒）` : "";
+    summaryPieces.push(`会议刚结束 ${delayed}，${remain.toFixed(1)} 分钟后将统一提醒`);
+  }
+  if (contextMode === "sleep") {
+    summaryPieces.push("系统睡眠中，提醒暂停");
+  }
   if (dailySummaryEl) {
     dailySummaryEl.textContent = summaryPieces.join("，") + "。";
   }
 
-  appendHistory(now, rawScore, Number(seatedMinutes));
-}
-
-function appendHistory(timestamp, score, seatedMinutes) {
-  if (!chart) return;
-
-  const label = timeFormatter.format(timestamp);
-  const labels = chart.data.labels;
-  const scoreData = chart.data.datasets[0].data;
-  const idleData = chart.data.datasets[1].data;
-
-  labels.push(label);
-  const percentScore = Math.max(0, Math.min(100, Number(score) * 100));
-  scoreData.push(percentScore);
-  idleData.push(seatedMinutes);
-
-  if (labels.length > HISTORY_LIMIT) {
-    labels.shift();
-    scoreData.shift();
-    idleData.shift();
-  }
-
-  chart.update();
 }
 
 fetchMetrics();

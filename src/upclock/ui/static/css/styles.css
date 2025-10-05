@@ -120,7 +120,6 @@ body {
   color: var(--danger);
 }
 
-.chart-panel,
 .insights {
   background: var(--card-bg);
   border: 1px solid var(--border);
@@ -129,7 +128,6 @@ body {
   backdrop-filter: blur(12px);
 }
 
-.chart-panel h3,
 .insights h3 {
   margin-top: 0;
   margin-bottom: 16px;

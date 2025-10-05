@@ -17,18 +17,24 @@ try:  # pragma: no cover - 仅在 macOS GUI 环境下可用
         NSAlert,
         NSAlertFirstButtonReturn,
         NSAlertSecondButtonReturn,
+        NSButton,
         NSColor,
         NSFont,
+        NSImage,
         NSInformationalRequest,
         NSLineBreakByWordWrapping,
         NSMakeRect,
+        NSMakeSize,
         NSMaxYEdge,
+        NSPanel,
         NSPopover,
         NSPopoverBehaviorTransient,
         NSSlider,
         NSTextField,
         NSView,
         NSViewController,
+        NSWindowStyleMaskTitled,
+        NSWindowStyleMaskClosable,
     )
     from Foundation import (  # type: ignore
         NSUserNotification,
@@ -41,18 +47,24 @@ except Exception:  # pragma: no cover - 测试环境/非 GUI 环境
     NSAlert = None  # type: ignore
     NSAlertFirstButtonReturn = 1000  # type: ignore
     NSAlertSecondButtonReturn = 1001  # type: ignore
+    NSButton = None  # type: ignore
     NSColor = None  # type: ignore
     NSFont = None  # type: ignore
+    NSImage = None  # type: ignore
     NSInformationalRequest = 0  # type: ignore
     NSLineBreakByWordWrapping = 0  # type: ignore
     NSMakeRect = None  # type: ignore
+    NSMakeSize = None  # type: ignore
     NSMaxYEdge = 0  # type: ignore
+    NSPanel = None  # type: ignore
     NSPopover = None  # type: ignore
     NSPopoverBehaviorTransient = 0  # type: ignore
     NSSlider = None  # type: ignore
     NSTextField = None  # type: ignore
     NSView = None  # type: ignore
     NSViewController = None  # type: ignore
+    NSWindowStyleMaskTitled = 0  # type: ignore
+    NSWindowStyleMaskClosable = 0  # type: ignore
     NSUserNotification = None  # type: ignore
     NSUserNotificationCenter = None  # type: ignore
     NSUserNotificationDefaultSoundName = None  # type: ignore
@@ -74,6 +86,9 @@ class StatusSnapshot:
     flow_mode_minutes: Optional[float] = None
     snooze_minutes: Optional[float] = None
     quiet_minutes: Optional[float] = None
+    context_mode: Optional[str] = None
+    context_message: Optional[str] = None
+    context_remaining_minutes: Optional[float] = None
 
 
 @dataclass
@@ -198,6 +213,7 @@ class StatusBarApp(rumps.App):
         self._banner_popover = None
         self._banner_timer: Optional[rumps.Timer] = None
         self._flow_menu_item = rumps.MenuItem(title="心流模式：关闭", callback=self._handle_flow_mode)
+        self._context_item = rumps.MenuItem("提醒模式：正常", callback=None)
         self._snooze_menu = rumps.MenuItem("延后提醒")
         self._snooze_5 = rumps.MenuItem("延后 5 分钟", lambda _: self._handle_snooze(5))
         self._snooze_15 = rumps.MenuItem("延后 15 分钟", lambda _: self._handle_snooze(15))
@@ -214,6 +230,7 @@ class StatusBarApp(rumps.App):
             rumps.MenuItem(title="专注指数", callback=None),
             rumps.MenuItem(title="在座/休息", callback=None),
             rumps.MenuItem(title="下一次提醒", callback=None),
+            self._context_item,
             self._refresh_item,
             self._flow_menu_item,
             self._snooze_menu,
@@ -256,6 +273,22 @@ class StatusBarApp(rumps.App):
             else:
                 label = "下一次提醒：--"
             self.menu["下一次提醒"].title = label
+        if snapshot.context_mode:
+            remaining = ""
+            if snapshot.context_remaining_minutes is not None:
+                remaining = f" · 剩余 {max(0.0, snapshot.context_remaining_minutes):.1f} 分"
+            message = snapshot.context_message or "提醒已静音"
+            if snapshot.context_mode == "meeting":
+                prefix = "会议模式"
+            elif snapshot.context_mode == "presentation":
+                prefix = "演示模式"
+            elif snapshot.context_mode == "post_meeting_pending":
+                prefix = "善后提醒待发送"
+            else:
+                prefix = "提醒模式"
+            self._context_item.title = f"{prefix}：{message}{remaining}"
+        else:
+            self._context_item.title = "提醒模式：正常"
         self._update_flow_menu(snapshot.flow_mode_minutes)
         self._update_snooze_menu(snapshot.snooze_minutes)
 
@@ -470,165 +503,182 @@ class StatusBarApp(rumps.App):
             rumps.alert("操作失败", "无法刷新久坐计时，请查看日志。")
 
     def _prompt_settings(self, current: UserSettings) -> Optional[UserSettings]:
-        if NSAlert is not None and NSTextField is not None and NSSlider is not None:
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_("提醒设置")
-            alert.setInformativeText_("配置久坐阈值、提醒冷却与静默时段")
-            alert.addButtonWithTitle_("保存")
-            alert.addButtonWithTitle_("取消")
+        # 使用 NSAlert + 滑块，暂时移除静默时段输入（因为无法键盘输入）
+        return self._prompt_settings_sliders(current)
 
-            width = 280.0
-            height = 220.0
-            container = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, height))
+    def _prompt_settings_sliders(self, current: UserSettings) -> Optional[UserSettings]:
+        """使用 NSAlert + 滑块实现设置，去掉静默时段输入框。"""
 
-            def make_label(text: str, y: float, alignment: int = 0) -> NSTextField:
-                label = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, y, width, 18.0))
-                label.setStringValue_(text)
-                label.setEditable_(False)
-                label.setBordered_(False)
-                label.setBezeled_(False)
-                label.setDrawsBackground_(False)
-                label.setAlignment_(alignment)
-                return label
+        if NSAlert is None or NSTextField is None or NSSlider is None:
+            # 回退到简单文本输入
+            return self._prompt_settings_simple(current)
 
-            def make_value_label(y: float, value: float) -> NSTextField:
-                value_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, y, width, 22.0))
-                value_label.setStringValue_(f"{value:.0f} 分钟")
-                value_label.setEditable_(False)
-                value_label.setBordered_(False)
-                value_label.setBezeled_(False)
-                value_label.setDrawsBackground_(False)
-                value_label.setAlignment_(1)
-                return value_label
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("⚙️ 提醒设置")
+        alert.setInformativeText_("通过滚轮调整久坐阈值和提醒冷却时间")
+        alert.addButtonWithTitle_("保存")
+        alert.addButtonWithTitle_("取消")
 
-            prolonged_value = max(15.0, min(240.0, float(current.prolonged_seated_minutes)))
-            cooldown_value = max(5.0, min(120.0, float(current.notification_cooldown_minutes)))
+        # 隐藏默认图标
+        try:
+            if NSImage is not None and NSMakeSize is not None:
+                empty_icon = NSImage.alloc().initWithSize_(NSMakeSize(1, 1))
+                alert.setIcon_(empty_icon)
+        except Exception:
+            pass
 
-            prolonged_label = make_label("久坐阈值 (分钟)：", 192.0)
-            prolonged_value_label = make_value_label(168.0, prolonged_value)
+        width = 280.0
+        height = 160.0  # 减少高度，因为去掉了静默时段
+        container = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, height))
 
-            prolonged_slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0.0, 136.0, width, 24.0))
-            prolonged_slider.setMinValue_(15.0)
-            prolonged_slider.setMaxValue_(240.0)
-            prolonged_slider.setDoubleValue_(prolonged_value)
-            prolonged_slider.setNumberOfTickMarks_(46)
-            prolonged_slider.setAllowsTickMarkValuesOnly_(True)
-            prolonged_slider.setContinuous_(True)
+        def make_label(text: str, y: float) -> NSTextField:
+            label = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, y, width, 18.0))
+            label.setStringValue_(text)
+            label.setEditable_(False)
+            label.setBordered_(False)
+            label.setBezeled_(False)
+            label.setDrawsBackground_(False)
+            if NSFont is not None:
+                label.setFont_(NSFont.systemFontOfSize_(12.0))
+            return label
 
-            cooldown_label = make_label("提醒冷却 (分钟)：", 112.0)
-            cooldown_value_label = make_value_label(88.0, cooldown_value)
+        def make_value_label(y: float, value: float) -> NSTextField:
+            value_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, y, width, 22.0))
+            value_label.setStringValue_(f"{value:.0f} 分钟")
+            value_label.setEditable_(False)
+            value_label.setBordered_(False)
+            value_label.setBezeled_(False)
+            value_label.setDrawsBackground_(False)
+            value_label.setAlignment_(1)  # center
+            if NSFont is not None:
+                value_label.setFont_(NSFont.systemFontOfSize_weight_(14.0, 0.3))
+            return value_label
 
-            cooldown_slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0.0, 56.0, width, 24.0))
-            cooldown_slider.setMinValue_(5.0)
-            cooldown_slider.setMaxValue_(120.0)
-            cooldown_slider.setDoubleValue_(cooldown_value)
-            cooldown_slider.setNumberOfTickMarks_(24)
-            cooldown_slider.setAllowsTickMarkValuesOnly_(True)
-            cooldown_slider.setContinuous_(True)
+        # 久坐阈值
+        prolonged_value = max(15.0, min(240.0, float(current.prolonged_seated_minutes)))
+        prolonged_label = make_label("久坐阈值：", height - 20.0)
+        prolonged_value_label = make_value_label(height - 44.0, prolonged_value)
 
-            quiet_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, 16.0, width, 22.0))
-            quiet_str = ", ".join(f"{start}-{end}" for start, end in current.quiet_hours)
-            quiet_field.setStringValue_(quiet_str)
-            quiet_field.setPlaceholderString_("例如 22:00-07:00, 12:30-13:30")
-            quiet_field.setEditable_(True)
-            quiet_field.setBezeled_(True)
-            quiet_field.setBordered_(True)
-            quiet_field.setDrawsBackground_(True)
+        prolonged_slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0.0, height - 76.0, width, 24.0))
+        prolonged_slider.setMinValue_(15.0)
+        prolonged_slider.setMaxValue_(240.0)
+        prolonged_slider.setDoubleValue_(prolonged_value)
+        prolonged_slider.setNumberOfTickMarks_(46)
+        prolonged_slider.setAllowsTickMarkValuesOnly_(True)
+        prolonged_slider.setContinuous_(True)
 
-            container.addSubview_(prolonged_label)
-            container.addSubview_(prolonged_value_label)
-            container.addSubview_(prolonged_slider)
-            container.addSubview_(cooldown_label)
-            container.addSubview_(cooldown_value_label)
-            container.addSubview_(cooldown_slider)
-            container.addSubview_(make_label("静默时段 (逗号分隔)：", 40.0))
-            container.addSubview_(quiet_field)
+        # 提醒冷却
+        cooldown_value = max(5.0, min(120.0, float(current.notification_cooldown_minutes)))
+        cooldown_label = make_label("提醒冷却：", height - 100.0)
+        cooldown_value_label = make_value_label(height - 124.0, cooldown_value)
 
-            if _FlowSliderDelegate is not None:
-                prolonged_delegate = _FlowSliderDelegate.alloc().initWithLabel_(prolonged_value_label)
-                prolonged_slider.setTarget_(prolonged_delegate)
-                prolonged_slider.setAction_(objc.selector(_FlowSliderDelegate.sliderChanged_, signature=b"v@:@"))
-                prolonged_delegate.sliderChanged_(prolonged_slider)
-                cooldown_delegate = _FlowSliderDelegate.alloc().initWithLabel_(cooldown_value_label)
-                cooldown_slider.setTarget_(cooldown_delegate)
-                cooldown_slider.setAction_(objc.selector(_FlowSliderDelegate.sliderChanged_, signature=b"v@:@"))
-                cooldown_delegate.sliderChanged_(cooldown_slider)
-                try:
-                    objc.setAssociatedObject(
-                        prolonged_slider,
-                        b"_upclock_settings_prolonged_delegate",
-                        prolonged_delegate,
-                        getattr(objc, "OBJC_ASSOCIATION_RETAIN", 0),
-                    )
-                    objc.setAssociatedObject(
-                        cooldown_slider,
-                        b"_upclock_settings_cooldown_delegate",
-                        cooldown_delegate,
-                        getattr(objc, "OBJC_ASSOCIATION_RETAIN", 0),
-                    )
-                except Exception:
-                    pass
+        cooldown_slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0.0, height - 156.0, width, 24.0))
+        cooldown_slider.setMinValue_(5.0)
+        cooldown_slider.setMaxValue_(120.0)
+        cooldown_slider.setDoubleValue_(cooldown_value)
+        cooldown_slider.setNumberOfTickMarks_(24)
+        cooldown_slider.setAllowsTickMarkValuesOnly_(True)
+        cooldown_slider.setContinuous_(True)
 
-            alert.setAccessoryView_(container)
-            window = alert.window()
-            if window is not None:
-                window.setInitialFirstResponder_(quiet_field)
-                window.makeFirstResponder_(quiet_field)
-            response = alert.runModal()
-            if response not in (NSAlertFirstButtonReturn, 1, 1000):
-                return None
+        container.addSubview_(prolonged_label)
+        container.addSubview_(prolonged_value_label)
+        container.addSubview_(prolonged_slider)
+        container.addSubview_(cooldown_label)
+        container.addSubview_(cooldown_value_label)
+        container.addSubview_(cooldown_slider)
 
-            prolonged = int(round(prolonged_slider.doubleValue()))
-            cooldown = int(round(cooldown_slider.doubleValue()))
+        # 绑定滑块更新
+        if _FlowSliderDelegate is not None:
+            prolonged_delegate = _FlowSliderDelegate.alloc().initWithLabel_(prolonged_value_label)
+            prolonged_slider.setTarget_(prolonged_delegate)
+            prolonged_slider.setAction_(objc.selector(_FlowSliderDelegate.sliderChanged_, signature=b"v@:@"))
+            prolonged_delegate.sliderChanged_(prolonged_slider)
 
-            quiet_slots = self._parse_quiet_input(quiet_field.stringValue())
-            if quiet_slots is None:
-                rumps.alert(
-                    "静默时段格式错误",
-                    "请使用 HH:MM-HH:MM 形式，多个时段用逗号分隔。",
+            cooldown_delegate = _FlowSliderDelegate.alloc().initWithLabel_(cooldown_value_label)
+            cooldown_slider.setTarget_(cooldown_delegate)
+            cooldown_slider.setAction_(objc.selector(_FlowSliderDelegate.sliderChanged_, signature=b"v@:@"))
+            cooldown_delegate.sliderChanged_(cooldown_slider)
+
+            # 保持引用
+            try:
+                objc.setAssociatedObject(
+                    prolonged_slider,
+                    b"_upclock_settings_prolonged_delegate",
+                    prolonged_delegate,
+                    getattr(objc, "OBJC_ASSOCIATION_RETAIN", 0),
                 )
-                return None
+                objc.setAssociatedObject(
+                    cooldown_slider,
+                    b"_upclock_settings_cooldown_delegate",
+                    cooldown_delegate,
+                    getattr(objc, "OBJC_ASSOCIATION_RETAIN", 0),
+                )
+            except Exception:
+                pass
 
-            return UserSettings(
-                prolonged_seated_minutes=max(15, prolonged),
-                notification_cooldown_minutes=max(5, cooldown),
-                quiet_hours=quiet_slots,
-            )
+        alert.setAccessoryView_(container)
+        response = alert.runModal()
+
+        if response not in (NSAlertFirstButtonReturn, 1, 1000):
+            return None
+
+        prolonged = int(round(prolonged_slider.doubleValue()))
+        cooldown = int(round(cooldown_slider.doubleValue()))
+
+        # 保留原有的静默时段设置
+        return UserSettings(
+            prolonged_seated_minutes=max(15, prolonged),
+            notification_cooldown_minutes=max(5, cooldown),
+            quiet_hours=current.quiet_hours,  # 保持不变
+        )
+
+    def _prompt_settings_simple(self, current: UserSettings) -> Optional[UserSettings]:
+        """使用 rumps.Window 实现简单的文本输入设置。"""
 
         window = rumps.Window(
             message=(
-                "请输入设置，静默时段示例: 22:00-07:00, 12:30-13:30\n"
-                "每行一个字段:久坐阈值,提醒冷却,静默时段"
+                "⚙️ 提醒设置\n\n"
+                "请输入设置（每行一个字段）：\n"
+                "第 1 行：久坐阈值（分钟）\n"
+                "第 2 行：提醒冷却（分钟）\n"
+                "第 3 行：静默时段（逗号分隔，如 22:00-07:00, 12:30-13:30）"
             ),
             title="提醒设置",
             default_text=(
                 f"{current.prolonged_seated_minutes}\n"
                 f"{current.notification_cooldown_minutes}\n"
-                ", ".join(f"{start}-{end}" for start, end in current.quiet_hours)
+                + ", ".join(f"{start}-{end}" for start, end in current.quiet_hours)
             ),
             ok="保存",
             cancel="取消",
-            dimensions=(260, 140),
+            dimensions=(380, 160),
+            secure=True,  # 关键：启用安全文本输入，允许键盘输入
         )
         window.icon = None
         response = window.run()
+
         if response.clicked != 1:
             return None
+
         lines = response.text.splitlines()
         if not lines:
             return None
+
         try:
             prolonged = int(lines[0].strip())
             cooldown = int(lines[1].strip()) if len(lines) > 1 else current.notification_cooldown_minutes
         except ValueError:
             rumps.alert("输入无效", "请填写数字形式的分钟数。")
             return None
+
         quiet_line = lines[2].strip() if len(lines) > 2 else ""
         quiet_slots = self._parse_quiet_input(quiet_line)
+
         if quiet_slots is None:
             rumps.alert(
                 "静默时段格式错误",
-                "请使用 HH:MM-HH:MM 形式，多个时段用逗号分隔。",
+                "请使用 HH:MM-HH:MM 形式，多个时段用逗号分隔。\n"
+                "例如：22:00-07:00, 12:30-13:30",
             )
             return None
 
@@ -676,23 +726,33 @@ class StatusBarApp(rumps.App):
 
         if NSAlert is not None and NSSlider is not None and NSTextField is not None and _FlowSliderDelegate is not None:
             alert = NSAlert.alloc().init()
-            alert.setMessageText_("开启心流模式")
+            alert.setMessageText_("🧘‍♂️ 开启心流模式")
             alert.setInformativeText_("通过滚轮选择持续时间：")
             alert.addButtonWithTitle_("开始")
             alert.addButtonWithTitle_("取消")
 
-            width = 220.0
-            container = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, 70.0))
+            # 隐藏默认图标：创建一个透明的小图标
+            try:
+                if NSImage is not None and NSMakeSize is not None:
+                    empty_icon = NSImage.alloc().initWithSize_(NSMakeSize(1, 1))
+                    alert.setIcon_(empty_icon)
+            except Exception:
+                pass
 
-            value_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, 40.0, width, 22.0))
+            width = 200.0
+            container = NSView.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, width, 60.0))
+
+            value_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, 32.0, width, 24.0))
             value_label.setStringValue_(f"{default_minutes:.0f} 分钟")
             value_label.setEditable_(False)
             value_label.setBordered_(False)
             value_label.setBezeled_(False)
             value_label.setDrawsBackground_(False)
             value_label.setAlignment_(1)  # center
+            if NSFont is not None:
+                value_label.setFont_(NSFont.systemFontOfSize_weight_(16.0, 0.3))  # 稍大字体，medium weight
 
-            slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0.0, 10.0, width, 24.0))
+            slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0.0, 8.0, width, 20.0))
             slider.setMinValue_(15.0)
             slider.setMaxValue_(240.0)
             slider.setDoubleValue_(max(15.0, min(240.0, default_minutes)))
@@ -734,6 +794,7 @@ class StatusBarApp(rumps.App):
             ok="开始",
             cancel="取消",
             dimensions=(200, 60),
+            secure=True,  # 启用安全输入，允许键盘输入
         )
         window.icon = None
         response = window.run()

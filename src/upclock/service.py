@@ -34,6 +34,8 @@ REMINDER_SUGGESTIONS = [
     "眺望窗外 20 米外的物体 20 秒，让眼睛休息一下。",
 ]
 
+CONTEXT_POST_SUMMARY_DELAY = 120.0  # 会议/演示结束后延迟 2 分钟集中推送提醒
+
 
 def _parse_quiet_slots(quiet_hours: list[list[str]]) -> list[tuple[int, int]]:
     slots: list[tuple[int, int]] = []
@@ -283,6 +285,8 @@ async def run_backend(shared: SharedState) -> None:
 
     last_notification_at: Optional[float] = None
     last_suggestion: Optional[str] = None
+    last_posture_reminder_at: Optional[float] = None  # 上次坐姿提醒时间
+    posture_reminder_interval = 15 * 60  # 15分钟坐姿提醒间隔（秒）
     cooldown_seconds = config.notification_cooldown_minutes * 60
     was_sleeping = shared.is_system_sleeping()
     prev_state: Optional[ActivityState] = None
@@ -291,6 +295,13 @@ async def run_backend(shared: SharedState) -> None:
     daily_prolonged_seconds = 0.0
     daily_break_count = 0
     daily_longest_seated_seconds = 0.0
+    context_state: Optional[str] = None
+    context_started_at = 0.0
+    context_last_app = ""
+    context_previous_app = ""
+    suppressed_notifications: list[str] = []
+    post_context_due: Optional[float] = None
+    post_context_sent = False
 
     try:
         while True:
@@ -330,6 +341,7 @@ async def run_backend(shared: SharedState) -> None:
                 if buffer is not None:
                     buffer.clear()
                 last_notification_at = None
+                last_posture_reminder_at = None  # 重置坐姿提醒计时
                 prev_state = ActivityState.SHORT_BREAK
 
             quiet_active, quiet_remaining = _quiet_status(dt.datetime.now(), quiet_slots)
@@ -338,11 +350,43 @@ async def run_backend(shared: SharedState) -> None:
             flow_active, flow_remaining = shared.get_flow_mode_state()
             snooze_active, snooze_remaining = shared.get_snooze_state()
 
+            window_info = window_monitor.latest_info() if window_monitor is not None else {}
+            front_app_name = str(window_info.get("app_name") or window_info.get("bundle_id") or "").strip()
+            meeting_app_active = bool(window_info.get("is_meeting_app"))
+            full_screen_active = bool(window_info.get("is_full_screen"))
+
+            candidate_context: Optional[str] = None
+            if meeting_app_active:
+                candidate_context = "meeting"
+            elif full_screen_active:
+                candidate_context = "presentation"
+
+            if candidate_context:
+                if context_state != candidate_context:
+                    context_state = candidate_context
+                    context_started_at = loop_now
+                    suppressed_notifications.clear()
+                if front_app_name:
+                    context_last_app = front_app_name
+                    context_previous_app = front_app_name
+                post_context_due = None
+                post_context_sent = False
+            else:
+                if context_state is not None:
+                    if suppressed_notifications:
+                        post_context_due = loop_now + CONTEXT_POST_SUMMARY_DELAY
+                        post_context_sent = False
+                    context_state = None
+                    context_started_at = 0.0
+                    if front_app_name:
+                        context_previous_app = front_app_name
+
             if sleeping:
                 if not was_sleeping:
                     engine.reset_state()
                     if buffer is not None:
                         buffer.clear()
+                    last_posture_reminder_at = None  # 睡眠时重置坐姿提醒计时
                 now = time.time()
                 snapshot = ActivitySnapshot(
                     score=1.0,
@@ -367,6 +411,9 @@ async def run_backend(shared: SharedState) -> None:
                         "daily_prolonged_minutes": round(daily_prolonged_seconds / 60, 2),
                         "daily_break_count": int(daily_break_count),
                         "daily_longest_seated_minutes": round(daily_longest_seated_seconds / 60, 2),
+                        "context_mode": "sleep",
+                        "context_message": "系统处于睡眠状态，计时暂停",
+                        "context_remaining_minutes": 0.0,
                     },
                     flow_mode_remaining=flow_remaining if flow_active else None,
                 )
@@ -383,6 +430,9 @@ async def run_backend(shared: SharedState) -> None:
                         flow_mode_minutes=flow_remaining if flow_active else None,
                         snooze_minutes=snooze_remaining if snooze_active else None,
                         quiet_minutes=quiet_remaining if quiet_active else None,
+                        context_mode="sleep",
+                        context_message="系统睡眠中，提醒暂停",
+                        context_remaining_minutes=None,
                     ),
                     notification=None,
                 )
@@ -437,6 +487,9 @@ async def run_backend(shared: SharedState) -> None:
             )
             snapshot.metrics["quiet_active"] = 1.0 if quiet_active else 0.0
             snapshot.metrics["quiet_remaining"] = float(quiet_remaining if quiet_active else 0.0)
+            snapshot.metrics["window_meeting"] = 1.0 if meeting_app_active else 0.0
+            snapshot.metrics["window_fullscreen"] = 1.0 if full_screen_active else 0.0
+            snapshot.metrics["context_app_name"] = context_last_app or context_previous_app
 
             if snooze_active and snapshot.state is not ActivityState.PROLONGED_SEATED:
                 shared.cancel_snooze()
@@ -446,6 +499,33 @@ async def run_backend(shared: SharedState) -> None:
 
             next_reminder_minutes: Optional[float] = None
             notification: Optional[NotificationMessage] = None
+            context_message: Optional[str] = None
+            context_mode_for_snapshot: Optional[str] = None
+            context_remaining_minutes: Optional[float] = None
+
+            context_suppress_notifications = False
+            if context_state is not None:
+                context_suppress_notifications = True
+                if context_state == "meeting":
+                    context_mode_for_snapshot = "meeting"
+                    context_message = (
+                        f"{context_last_app} 会议中，提醒已静音"
+                        if context_last_app
+                        else "会议模式，提醒已静音"
+                    )
+                else:
+                    context_mode_for_snapshot = "presentation"
+                    context_message = (
+                        f"{context_last_app} 全屏演示中，提醒暂缓"
+                        if context_last_app
+                        else "演示模式，提醒暂缓"
+                    )
+            elif post_context_due is not None:
+                context_suppress_notifications = True
+                context_mode_for_snapshot = "post_meeting_pending"
+                remaining_seconds = max(0.0, post_context_due - loop_now)
+                context_remaining_minutes = remaining_seconds / 60
+                context_message = "会议刚结束，稍后统一提醒"
 
             if config.notifications_enabled and not flow_active and not snooze_active and not quiet_active:
                 if snapshot.state is ActivityState.PROLONGED_SEATED:
@@ -461,20 +541,82 @@ async def run_backend(shared: SharedState) -> None:
 
                     if should_notify:
                         suggestion = _pick_reminder_suggestion(last_suggestion)
-                        notification = NotificationMessage(
-                            title="该活动一下啦",
-                            subtitle="久坐提醒",
-                            body=suggestion,
-                        )
-                        last_notification_at = now
                         last_suggestion = suggestion
-                        next_reminder_minutes = config.notification_cooldown_minutes
+                        if context_suppress_notifications:
+                            suppressed_notifications.append(suggestion)
+                            last_notification_at = now
+                            next_reminder_minutes = None
+                        else:
+                            notification = NotificationMessage(
+                                title="该活动一下啦",
+                                subtitle="久坐提醒",
+                                body=suggestion,
+                            )
+                            last_notification_at = now
+                            next_reminder_minutes = config.notification_cooldown_minutes
                 else:
                     last_notification_at = None
             elif snooze_active and snapshot.state is ActivityState.PROLONGED_SEATED:
                 next_reminder_minutes = snooze_remaining
             elif quiet_active and snapshot.state is ActivityState.PROLONGED_SEATED:
                 next_reminder_minutes = quiet_remaining
+
+            if (
+                config.notifications_enabled
+                and post_context_due is not None
+                and loop_now >= post_context_due
+                and not post_context_sent
+            ):
+                summary_parts = []
+                if context_previous_app:
+                    summary_parts.append(f"{context_previous_app} 已结束")
+                if suppressed_notifications:
+                    summary_parts.append(f"会议期间已延后 {len(suppressed_notifications)} 次提醒")
+                summary_parts.append("现在起身活动、补充水分吧！")
+                body = "，".join(summary_parts)
+                notification = NotificationMessage(
+                    title="会议结束，别忘了放松",
+                    subtitle="善后提醒",
+                    body=body,
+                )
+                last_notification_at = loop_now
+                last_suggestion = None
+                post_context_sent = True
+                post_context_due = None
+                suppressed_notifications.clear()
+                context_mode_for_snapshot = None
+                context_message = None
+                context_suppress_notifications = False
+
+            # 每15分钟坐姿提醒（仅在坐着时）
+            if (
+                config.notifications_enabled
+                and snapshot.state in (ActivityState.ACTIVE, ActivityState.PROLONGED_SEATED)
+                and not sleeping
+                and not flow_active
+                and not snooze_active
+                and not quiet_active
+                and not context_suppress_notifications
+            ):
+                time_since_last_posture_reminder = (
+                    (loop_now - last_posture_reminder_at) if last_posture_reminder_at is not None else float("inf")
+                )
+                if time_since_last_posture_reminder >= posture_reminder_interval:
+                    # 发送坐姿提醒（不覆盖久坐提醒）
+                    if notification is None:  # 只有在没有其他通知时才发送
+                        notification = NotificationMessage(
+                            title="💺 坐姿检查",
+                            subtitle="体态提醒",
+                            body="请检查当前坐姿体态，注意后背坐实，双臂平放。",
+                        )
+                    last_posture_reminder_at = loop_now
+
+            snapshot.metrics["context_mode"] = context_mode_for_snapshot or "normal"
+            snapshot.metrics["context_message"] = context_message or ""
+            snapshot.metrics["context_remaining_minutes"] = (
+                float(context_remaining_minutes) if context_remaining_minutes is not None else 0.0
+            )
+            snapshot.metrics["context_suppressed_notifications"] = float(len(suppressed_notifications))
 
             shared.set(
                 activity=snapshot,
@@ -488,6 +630,9 @@ async def run_backend(shared: SharedState) -> None:
                     flow_mode_minutes=flow_remaining if flow_active else None,
                     snooze_minutes=snooze_remaining if snooze_active else None,
                     quiet_minutes=quiet_remaining if quiet_active else None,
+                    context_mode=context_mode_for_snapshot,
+                    context_message=context_message,
+                    context_remaining_minutes=context_remaining_minutes,
                 ),
                 notification=notification,
             )

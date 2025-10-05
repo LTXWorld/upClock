@@ -22,6 +22,7 @@ vision = [
     "numpy>=1.26",
     "mediapipe>=0.10",
     "onnxruntime>=1.17",
+    "pyobjc-framework-AVFoundation>=9.2",
 ]
 macos = [
     "py2app>=0.28",
